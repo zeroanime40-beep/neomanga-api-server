@@ -1,6 +1,6 @@
 # Neo Manga Centralized Backend — System Architecture, Evolution & Refactoring Audit
 **Author:** Elite Senior Systems Architect & Lead Developer  
-**Status:** MeshManga Staging Validation (Olympus Paused)  
+**Status:** MeshManga Active, Olympus Paused for Isolated Verification  
 **Date:** July 13, 2026
 
 ---
@@ -256,6 +256,13 @@ Following the refactoring, the `/api/v1/chapters/pages` endpoint will emit a cle
 ---
 
 ## 5. Future Roadmap & Pending Tasks
+
+### Tomorrow's Architectural Roadmap
+
+1. **Unpause the First Source**: Re-enable the Olympus Staff extension (`masterSource`) registration within `AndroidSourceManager.kt`.
+2. **Multi-Source Convergence**: Refactor the backend router dispatcher to dynamically serve both active sources simultaneously based on the incoming `site_url`.
+3. **Deduplication Layer**: Implement a smart database-merging system to prevent duplicate entries if the same title exists on both sites, using the shared `slug` key.
+4. **Cross-Source Chapter Merging**: Develop a fallback parser to merge chapter arrays from both sources to fill missing chapter gaps and provide a complete reader index for the end-user.
 
 ### Short-Term Engineering Tasks (Next 1–2 Weeks)
 
