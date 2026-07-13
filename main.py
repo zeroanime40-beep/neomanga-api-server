@@ -9,6 +9,7 @@ from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE
 import core.database
 from core.scheduler import start_scheduler
 from scrapers.madara_base import scrape_madara_latest, scrape_madara_catalog, scrape_madara_details, scrape_madara_pages
+from scrapers.meshmanga import scrape_meshmanga_latest, scrape_meshmanga_catalog, scrape_meshmanga_details, scrape_meshmanga_pages
 import httpx
 import logging
 
@@ -32,19 +33,28 @@ def read_root():
     return {"status": "Neo Manga API Server is running"}
 
 @app.get(f"{API_PREFIX}/manga/latest")
-async def get_latest_manga(site_url: str = Query(..., description="The base URL of the Madara manga site to scrape")):
+async def get_latest_manga(site_url: str = Query(..., description="The base URL of the manga site to scrape")):
     """
-    Get the latest manga updates from a specified Madara-based website.
+    Get the latest manga updates from a specified website.
     """
-    # Simple validation on scheme
     if not site_url.startswith(("http://", "https://")):
         raise HTTPException(
             status_code=400,
             detail="Invalid URL scheme. The URL must start with http:// or https://"
         )
 
+    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
+    if "olympus" in site_url.lower():
+        raise HTTPException(
+            status_code=503,
+            detail="Olympus source is temporarily paused for isolated testing"
+        )
+
     try:
-        updates = await scrape_madara_latest(site_url)
+        if "meshmanga.com" in site_url.lower():
+            updates = await scrape_meshmanga_latest(site_url)
+        else:
+            updates = await scrape_madara_latest(site_url)
         
         # Ingest to MongoDB securely with Exception Shield
         if core.database.IS_DB_ONLINE:
@@ -68,7 +78,6 @@ async def get_latest_manga(site_url: str = Query(..., description="The base URL 
             detail=f"Request to target site timed out: {str(exc)}"
         )
     except httpx.HTTPStatusError as exc:
-        # Pass through status codes or return 502/504
         raise HTTPException(
             status_code=502,
             detail=f"Target site returned status error: {exc.response.status_code}"
@@ -87,18 +96,24 @@ async def get_latest_manga(site_url: str = Query(..., description="The base URL 
 
 @app.get(f"{API_PREFIX}/manga/catalog")
 async def get_manga_catalog(
-    site_url: str = Query(..., description="The base URL of the Madara manga site to scrape"),
+    site_url: str = Query(..., description="The base URL of the manga site to scrape"),
     page: Optional[int] = Query(default=None),
     pages: Optional[int] = Query(default=None)
 ):
     """
-    Scrape a specific page of the catalog from a given Madara-based site,
-    upsert each item into MongoDB, and return the list.
+    Scrape a specific page of the catalog, upsert each item into MongoDB, and return the list.
     """
     if not site_url.startswith(("http://", "https://")):
         raise HTTPException(
             status_code=400,
             detail="Invalid URL scheme. The URL must start with http:// or https://"
+        )
+
+    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
+    if "olympus" in site_url.lower():
+        raise HTTPException(
+            status_code=503,
+            detail="Olympus source is temporarily paused for isolated testing"
         )
 
     final_page = 1
@@ -110,7 +125,10 @@ async def get_manga_catalog(
     print(f"[Server] Client requested Catalog Page: {final_page} (Mapped from pages={pages} / page={page})")
 
     try:
-        items = await scrape_madara_catalog(site_url, page=final_page)
+        if "meshmanga.com" in site_url.lower():
+            items = await scrape_meshmanga_catalog(site_url, page=final_page)
+        else:
+            items = await scrape_madara_catalog(site_url, page=final_page)
         
         # Ingest to MongoDB securely with Exception Shield
         if core.database.IS_DB_ONLINE:
@@ -161,7 +179,10 @@ async def get_manga_details(
     """
     if not manga_url.startswith(("http://", "https://")):
         from urllib.parse import urljoin
-        manga_url = urljoin("https://olympustaff.com", manga_url)
+        if "meshmanga.com" in manga_url.lower():
+            manga_url = urljoin("https://meshmanga.com", manga_url)
+        else:
+            manga_url = urljoin("https://olympustaff.com", manga_url)
 
     if not manga_url.startswith(("http://", "https://")):
         raise HTTPException(
@@ -169,8 +190,18 @@ async def get_manga_details(
             detail="Invalid URL scheme. The URL must start with http:// or https://"
         )
 
+    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
+    if "olympus" in manga_url.lower():
+        raise HTTPException(
+            status_code=503,
+            detail="Olympus source is temporarily paused for isolated testing"
+        )
+
     try:
-        details = await scrape_madara_details(manga_url)
+        if "meshmanga.com" in manga_url.lower():
+            details = await scrape_meshmanga_details(manga_url)
+        else:
+            details = await scrape_madara_details(manga_url)
         return {
             "status": "success",
             "manga_url": manga_url,
@@ -203,11 +234,14 @@ async def get_chapter_pages(
     chapter_url: str = Query(..., description="The direct URL of the specific chapter page to scrape image URLs from")
 ):
     """
-    Get the reading image URLs from a specific chapter page, uploading them to Cloudinary and caching in DB.
+    Get the reading image URLs from a specific chapter page, and cache them in MongoDB.
     """
     if not chapter_url.startswith(("http://", "https://")):
         from urllib.parse import urljoin
-        chapter_url = urljoin("https://olympustaff.com", chapter_url)
+        if "meshmanga.com" in chapter_url.lower():
+            chapter_url = urljoin("https://meshmanga.com", chapter_url)
+        else:
+            chapter_url = urljoin("https://olympustaff.com", chapter_url)
 
     if not chapter_url.startswith(("http://", "https://")):
         raise HTTPException(
@@ -215,11 +249,17 @@ async def get_chapter_pages(
             detail="Invalid URL scheme. The URL must start with http:// or https://"
         )
 
+    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
+    if "olympus" in chapter_url.lower():
+        raise HTTPException(
+            status_code=503,
+            detail="Olympus source is temporarily paused for isolated testing"
+        )
+
     try:
         import gc
         import asyncio
         from core.database import get_cached_chapter_pages, cache_chapter_pages
-        from core.storage import upload_image_to_cloudinary
 
         # 1. Check cache first
         cached_pages = await get_cached_chapter_pages(chapter_url)
@@ -233,7 +273,11 @@ async def get_chapter_pages(
             }
 
         # 2. Scrape raw page URLs
-        raw_pages = await scrape_madara_pages(chapter_url)
+        if "meshmanga.com" in chapter_url.lower():
+            raw_pages = await scrape_meshmanga_pages(chapter_url)
+        else:
+            raw_pages = await scrape_madara_pages(chapter_url)
+            
         if not raw_pages:
             return {
                 "status": "success",
