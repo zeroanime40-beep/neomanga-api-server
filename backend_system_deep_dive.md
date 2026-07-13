@@ -252,7 +252,7 @@ Following the refactoring, the `/api/v1/chapters/pages` endpoint will emit a cle
 
 ### Short-Term Engineering Tasks (Next 1–2 Weeks)
 
-1.  **[ACTIVE - STAGING] Multi-Source Integration (MeshManga)**: Created the REST API-based parser in `scrapers/meshmanga.py` that interfaces directly with `https://appswat.com/v2/api/v2/`. Refactored `main.py` into a dynamic router dispatching queries to both sources. To prevent cross-contamination during validation, the Olympus Staff source has been temporarily paused by returning a 503 HTTP status.
+1.  **[ACTIVE - STAGING] Multi-Source Integration (MeshManga)**: Created the REST API-based parser in `scrapers/meshmanga.py` that interfaces directly with `https://appswat.com/v2/api/v2/`. Refactored `main.py` into a dynamic router dispatching queries to both sources. Resolved a critical database ingestion bypass on Vercel by implementing a lazy initialization circuit breaker check (`check_db_online()`) to bypass Vercel serverless lifespan startup blocks. Paused Olympus Staff with an isolated 503 status during verification.
 2.  **[COMPLETED] Refactoring the Cloudinary Chapter & Cover Uploads**: Stripped all concurrent Cloudinary uploading for chapter pages and cover thumbnails, reducing latency to <1s. Pages and covers are now cached and returned using their raw target URLs. Deprecated `core/storage.py` entirely.
 2.  **VPS / Cloud Migration**:
     *   Deploy the FastAPI application on **Railway** or **Render** to bypass Vercel's serverless timeout limits.

@@ -1,7 +1,7 @@
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import core.database
-from core.database import IS_DB_ONLINE, upsert_manga_entry
+from core.database import IS_DB_ONLINE, upsert_manga_entry, check_db_online
 from scrapers.madara_base import scrape_madara_latest
 
 logger = logging.getLogger("uvicorn")
@@ -15,7 +15,7 @@ async def fetch_and_sync_latest_updates():
     and sync them to the database if MongoDB is online.
     """
     # Dynamically check the database status flag
-    if not core.database.IS_DB_ONLINE:
+    if not await check_db_online():
         logger.warning("[Scheduler] MongoDB is offline. Skipping background sync task.")
         return
 

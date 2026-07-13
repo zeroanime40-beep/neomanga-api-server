@@ -10,8 +10,8 @@ logger = logging.getLogger("uvicorn")
 
 MONGO_DETAILS = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-# Global database online flag
-IS_DB_ONLINE = False
+# Global database online flag (None = untested, True = online, False = offline)
+IS_DB_ONLINE = None
 
 # Initialize AsyncIOMotorClient with 1-second timeout
 client = AsyncIOMotorClient(MONGO_DETAILS, serverSelectionTimeoutMS=1000)
@@ -52,6 +52,15 @@ async def test_db_connection():
         logger.error(f"MongoDB Connection Test: FAILED. Check if MongoDB is running on localhost:27017. Error: {str(exc)}")
         IS_DB_ONLINE = False
         return False
+
+async def check_db_online() -> bool:
+    """
+    Ensure the database connection is tested lazily.
+    """
+    global IS_DB_ONLINE
+    if IS_DB_ONLINE is None:
+        await test_db_connection()
+    return IS_DB_ONLINE
 
 async def upsert_manga_entry(manga_data: dict) -> dict:
     """
@@ -127,7 +136,7 @@ async def get_cached_chapter_pages(chapter_url: str) -> list:
     """
     Retrieve cached chapter pages from MongoDB if online.
     """
-    if not IS_DB_ONLINE:
+    if not await check_db_online():
         return None
     try:
         doc = await chapters_collection.find_one({"chapter_url": chapter_url})
@@ -141,7 +150,7 @@ async def cache_chapter_pages(chapter_url: str, pages: list):
     """
     Cache raw target chapter page URLs in MongoDB if online.
     """
-    if not IS_DB_ONLINE:
+    if not await check_db_online():
         return
     try:
         await chapters_collection.update_one(

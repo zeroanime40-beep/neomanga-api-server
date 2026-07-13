@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from pymongo import MongoClient
 from core.config import PROJECT_NAME, API_PREFIX
-from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE
+from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online
 import core.database
 from core.scheduler import start_scheduler
 from scrapers.madara_base import scrape_madara_latest, scrape_madara_catalog, scrape_madara_details, scrape_madara_pages
@@ -57,7 +57,7 @@ async def get_latest_manga(site_url: str = Query(..., description="The base URL 
             updates = await scrape_madara_latest(site_url)
         
         # Ingest to MongoDB securely with Exception Shield
-        if core.database.IS_DB_ONLINE:
+        if await check_db_online():
             for update in updates:
                 try:
                     await upsert_manga_entry(update)
@@ -131,7 +131,7 @@ async def get_manga_catalog(
             items = await scrape_madara_catalog(site_url, page=final_page)
         
         # Ingest to MongoDB securely with Exception Shield
-        if core.database.IS_DB_ONLINE:
+        if await check_db_online():
             for item in items:
                 try:
                     await upsert_manga_entry(item)
