@@ -1,4 +1,4 @@
-# Trigger fresh build for Cloudinary configuration
+# Force new build timestamp: 2026-07-13-12-45
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
