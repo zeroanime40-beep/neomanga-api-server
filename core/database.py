@@ -1,0 +1,118 @@
+import os
+import re
+import logging
+from datetime import datetime
+from urllib.parse import urlparse
+from motor.motor_asyncio import AsyncIOMotorClient
+
+logger = logging.getLogger("uvicorn")
+
+MONGO_DETAILS = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+
+# Global database online flag
+IS_DB_ONLINE = False
+
+# Initialize AsyncIOMotorClient with 1-second timeout
+client = AsyncIOMotorClient(MONGO_DETAILS, serverSelectionTimeoutMS=1000)
+
+# Define the database
+database = client.neomanga_db
+
+# Helper collection reference
+manga_collection = database.get_collection("manga_catalog")
+
+def generate_slug(title: str) -> str:
+    """
+    Generate a clean slug from the manga title (lowercase, trimmed, alphanumeric and hyphens only).
+    Supports unicode letters to handle non-English manga names gracefully.
+    """
+    slug = title.lower().strip()
+    # Replace spaces, hyphens, and underscores with a single hyphen
+    slug = re.sub(r'[\s\-_]+', '-', slug)
+    # Strip any character that is not a word character (alphanumeric) or hyphen
+    slug = re.sub(r'[^\w\-]', '', slug)
+    # Remove leading/trailing hyphens
+    slug = slug.strip('-')
+    return slug
+
+async def test_db_connection():
+    """
+    Test MongoDB database connection by issuing a ping command.
+    """
+    global IS_DB_ONLINE
+    try:
+        # The admin database or the default database can be pinged
+        await database.command("ping")
+        logger.info("MongoDB Connection Test: SUCCESS. Bound to database 'neomanga_db'.")
+        IS_DB_ONLINE = True
+        return True
+    except Exception as exc:
+        logger.error(f"MongoDB Connection Test: FAILED. Check if MongoDB is running on localhost:27017. Error: {str(exc)}")
+        IS_DB_ONLINE = False
+        return False
+
+async def upsert_manga_entry(manga_data: dict) -> dict:
+    """
+    Upsert a manga entry into the MongoDB collection supporting a unified multi-source schema.
+    Deduplicates manga profiles by using a clean slug generated from the title.
+    """
+    try:
+        slug = generate_slug(manga_data["title"])
+        
+        # Parse the host name to act as a unique key for the source site
+        parsed_url = urlparse(manga_data["url"])
+        source_key = parsed_url.netloc.replace(".", "_")
+        
+        now_str = datetime.utcnow().isoformat()
+        
+        source_payload = {
+            "url": manga_data["url"],
+            "latest_chapter": manga_data["latest_chapter"],
+            "updated_at": now_str
+        }
+        
+        # Check if a document with that slug already exists
+        existing_manga = await manga_collection.find_one({"slug": slug})
+        
+        if existing_manga:
+            # Document exists: update the specific nested source field and updated_at
+            update_payload = {
+                f"sources.{source_key}": source_payload,
+                "updated_at": now_str
+            }
+            # Fallback to copy thumbnail if the existing profile has none
+            if manga_data.get("thumbnail") and not existing_manga.get("thumbnail"):
+                update_payload["thumbnail"] = manga_data["thumbnail"]
+                
+            result = await manga_collection.update_one(
+                {"slug": slug},
+                {"$set": update_payload}
+            )
+            return {
+                "status": "updated",
+                "matched_count": result.matched_count,
+                "modified_count": result.modified_count,
+                "upserted_id": None
+            }
+        else:
+            # Document does not exist: create the complete initial document structure
+            new_doc = {
+                "title": manga_data["title"],
+                "slug": slug,
+                "thumbnail": manga_data.get("thumbnail", ""),
+                "created_at": now_str,
+                "updated_at": now_str,
+                "sources": {
+                    source_key: source_payload
+                }
+            }
+            result = await manga_collection.insert_one(new_doc)
+            return {
+                "status": "inserted",
+                "matched_count": 0,
+                "modified_count": 0,
+                "upserted_id": str(result.inserted_id)
+            }
+    except Exception as exc:
+        logger.error(f"Failed to upsert manga entry for {manga_data.get('title')}: {str(exc)}")
+        raise
