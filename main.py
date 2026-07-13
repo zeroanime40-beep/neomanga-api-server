@@ -2,10 +2,11 @@
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Query
+from datetime import datetime
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from pymongo import MongoClient
 from core.config import PROJECT_NAME, API_PREFIX
-from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online
+from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online, manga_collection
 import core.database
 from core.scheduler import start_scheduler
 from scrapers.madara_base import scrape_madara_latest, scrape_madara_catalog, scrape_madara_details, scrape_madara_pages
@@ -94,14 +95,36 @@ async def get_latest_manga(site_url: str = Query(..., description="The base URL 
         )
 
 
+async def ingest_catalog_background(items: list):
+    """
+    Background task to ingest scraped catalog items into MongoDB.
+    """
+    if not items:
+        return
+    if await check_db_online():
+        logger.info(f"[Background Task] Starting ingestion of {len(items)} items to MongoDB...")
+        for item in items:
+            try:
+                await upsert_manga_entry(item)
+            except Exception as db_exc:
+                logger.error(f"[Background Task] Database ingestion failed for {item.get('title')}: {str(db_exc)}")
+        logger.info("[Background Task] Ingestion completed.")
+    else:
+        logger.warning("[Background Task] MongoDB is offline. Skipping database ingestion loop.")
+
+
 @app.get(f"{API_PREFIX}/manga/catalog")
 async def get_manga_catalog(
     site_url: str = Query(..., description="The base URL of the manga site to scrape"),
     page: Optional[int] = Query(default=None),
-    pages: Optional[int] = Query(default=None)
+    pages: Optional[int] = Query(default=None),
+    background_tasks: BackgroundTasks = None
 ):
     """
     Scrape a specific page of the catalog, upsert each item into MongoDB, and return the list.
+    If the source is MeshManga, a read-first cache check is performed. If fresh catalog
+    data exists (< 4 hours old), the cached list is immediately returned.
+    Scraped updates are ingested asynchronously in the background.
     """
     if not site_url.startswith(("http://", "https://")):
         raise HTTPException(
@@ -124,21 +147,58 @@ async def get_manga_catalog(
 
     print(f"[Server] Client requested Catalog Page: {final_page} (Mapped from pages={pages} / page={page})")
 
+    # 1. READ-FIRST LOGIC (MeshManga specific cache lookup)
+    if "meshmanga.com" in site_url.lower():
+        if await check_db_online():
+            try:
+                # Query documents with source == "meshmanga" or sources.meshmanga_com exists
+                cursor = manga_collection.find({
+                    "$or": [
+                        {"sources.meshmanga_com": {"$exists": True}},
+                        {"source": "meshmanga"}
+                    ]
+                }).sort("updated_at", -1)
+                cached_docs = await cursor.to_list(length=1000)
+
+                if cached_docs:
+                    latest_doc = cached_docs[0]
+                    updated_at_str = latest_doc.get("updated_at")
+                    if updated_at_str:
+                        latest_updated = datetime.fromisoformat(updated_at_str)
+                        age = datetime.utcnow() - latest_updated
+                        # Cache is fresh (< 4 hours old)
+                        if age.total_seconds() < 4 * 3600:
+                            items = []
+                            for doc in cached_docs:
+                                url = doc.get("sources", {}).get("meshmanga_com", {}).get("url") or doc.get("url", "")
+                                latest_chapter = doc.get("sources", {}).get("meshmanga_com", {}).get("latest_chapter") or doc.get("latest_chapter", "")
+                                items.append({
+                                    "title": doc.get("title", ""),
+                                    "url": url,
+                                    "thumbnail": doc.get("thumbnail", ""),
+                                    "latest_chapter": latest_chapter
+                                })
+                            logger.info(f"[API] Serving cached MeshManga catalog with {len(items)} items (Age: {age.total_seconds() / 3600:.2f} hours)")
+                            return {
+                                "status": "success",
+                                "site_url": site_url,
+                                "page": final_page,
+                                "pages_scraped": final_page,
+                                "count": len(items),
+                                "items": items
+                            }
+            except Exception as cache_exc:
+                logger.error(f"Error querying cache for MeshManga: {str(cache_exc)}")
+
     try:
         if "meshmanga.com" in site_url.lower():
             items = await scrape_meshmanga_catalog(site_url, page=final_page)
         else:
             items = await scrape_madara_catalog(site_url, page=final_page)
         
-        # Ingest to MongoDB securely with Exception Shield
-        if await check_db_online():
-            for item in items:
-                try:
-                    await upsert_manga_entry(item)
-                except Exception as db_exc:
-                    logger.error(f"Database ingestion failed for {item.get('title')}: {str(db_exc)}")
-        else:
-            logger.warning("MongoDB is offline. Skipping database ingestion loop entirely to prevent timeouts.")
+        # 2. ASYNCHRONOUS BACKGROUND WRITES
+        if items and background_tasks:
+            background_tasks.add_task(ingest_catalog_background, items)
             
         return {
             "status": "success",

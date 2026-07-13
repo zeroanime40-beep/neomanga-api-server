@@ -93,7 +93,14 @@ The system runs `AsyncIOScheduler` from `apscheduler` inside [core/scheduler.py]
 #### Step 7: Vercel Serverless Routing
 The application exposes a serverless configuration via [vercel.json](file:///D:/neomangatest/neomanga-api-server/vercel.json). All routes are routed to `main.py` using `@vercel/python`. During execution on Vercel, the scheduler runs dynamically, and background operations can be manually forced using the `/api/cron-scrape` endpoint, which triggers `fetch_and_sync_latest_updates()` on-demand.
 
-### 1.1 Multi-Source Dispatcher Layout
+### 1.1 Read-First Catalog Caching Strategy & Async Background Ingestion
+To eliminate severe response latency and prevent blocking client-side renders, the `/api/v1/manga/catalog` endpoint implements a high-performance **Read-First Caching Strategy** combined with **Asynchronous Background Ingestion**:
+
+1. **Read-First Cache Verification**: Before triggering any external scrape for MeshManga, the server queries the MongoDB `manga_catalog` collection for documents associated with the `meshmanga` source.
+2. **Freshness Assessment**: If the query returns existing documents and the most recently updated entry has an `updated_at` timestamp that is less than 4 hours old, the server immediately reconstructs the catalog payload and serves it directly from the cache. The external API scrape is bypassed entirely, reducing catalog load times from several seconds to milliseconds.
+3. **Non-Blocking Background Ingestion**: If the cache is empty or expired (> 4 hours old), the server executes the external scrape to fetch fresh items. Instead of waiting for database writes to complete, the scraped items are immediately returned to the client. The ingestion process is offloaded to FastAPI's `BackgroundTasks`, executing `upsert_manga_entry` asynchronously in the background.
+
+### 1.2 Multi-Source Dispatcher Layout
 To support both Madara-based sites (like Olympus Staff) and client-side Next.js sites (like MeshManga), the server integrates a domain-based dispatcher. 
 *   **Olympus Staff (Madara)**: Standard BeautifulSoup HTML scraper [scrapers/madara_base.py](file:///D:/neomangatest/neomanga-api-server/scrapers/madara_base.py). (Temporarily returns `HTTP 503` during staging to guarantee isolated MeshManga testing).
 *   **MeshManga (Next.js)**: JSON REST API scraper [scrapers/meshmanga.py](file:///D:/neomangatest/neomanga-api-server/scrapers/meshmanga.py) interfacing directly with the Django REST API endpoints at `https://appswat.com/v2/api/v2/`.
