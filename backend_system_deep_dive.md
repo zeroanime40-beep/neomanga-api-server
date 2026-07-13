@@ -7,7 +7,7 @@
 
 ## 1. Core Architecture & Exact Workflow
 
-This section outlines the step-by-step lifecycle of data in the Neo Manga Backend Server, illustrating how a request propagates from the Tachiyomi/Mihon client through FastAPI, triggers scraping mechanisms, queries or updates MongoDB cache collections, and integrates with Cloudinary and Vercel Serverless Functions.
+This section outlines the step-by-step lifecycle of data in the Neo Manga Backend Server, illustrating how a request propagates from the Tachiyomi/Mihon client through FastAPI, triggers scraping mechanisms, queries or updates MongoDB cache collections, and integrates with Vercel Serverless Functions in a 100% Cloudinary-free metadata-only mode.
 
 ```mermaid
 graph TD
@@ -24,9 +24,8 @@ graph TD
         M_Site[Madara/TS-Theme Site e.g. Olympus Staff]
     end
 
-    subgraph Persistent Storage & CDN
+    subgraph Persistent Storage
         DB[(MongoDB Cache: neomanga_db)]
-        CLD[Cloudinary CDN]
     end
 
     Mihon -->|HTTPS GET Request| V_GW
@@ -39,9 +38,6 @@ graph TD
     FA -->|Parse DOM & Filter NSFW| Parser[scrapers/madara_base.py]
     
     Parser -->|Return Structured JSON| FA
-    FA -->|Upload Thumbnail Cover| CLD
-    CLD -->|Return Secure Cover URL| FA
-    
     FA -->|Upsert Manga & Cache Pages| DB
     FA -->|Return Final JSON Response| Mihon
 ```
@@ -88,8 +84,8 @@ If a title matches any of these keywords (case-insensitively), it is discarded b
     This allows a single manga entry to consolidate metadata and URL pointers across multiple source sites.
 3.  **Exception Shield & Timeout Limit**: The database client ([core/database.py](file:///D:/neomangatest/neomanga-api-server/core/database.py)) is configured with a 1-second timeout selection ceiling (`serverSelectionTimeoutMS=1000`). If a startup ping fails, the global boolean `IS_DB_ONLINE` is flagged as `False`. The ingestion functions block execution loops if the database is offline, preventing the endpoints from hanging.
 
-#### Step 5: Cloudinary Image Storage
-During manga catalog ingestion, if a raw cover thumbnail is found and does not belong to Cloudinary, the server triggers `upload_image_to_cloudinary()` targeting the `"neomanga/covers/"` folder. This downloads the cover image bytes (bypassing hotlinking protections) and uploads them to the Cloudinary cloud storage instance. The secure CDN URL is then cached in the MongoDB document.
+#### Step 5: Raw Cover URL Retention
+During manga catalog ingestion, the server no longer processes cover thumbnails through Cloudinary or any other media storage service. The raw, original target site cover URL is directly assigned to the `thumbnail` field in the MongoDB document without any processing or downloading, maintaining a pure metadata registry.
 
 #### Step 6: Background Synchronization Scheduler
 The system runs `AsyncIOScheduler` from `apscheduler` inside [core/scheduler.py](file:///D:/neomangatest/neomanga-api-server/core/scheduler.py). Every 60 minutes, the task `fetch_and_sync_latest_updates()` loops through the configured `TARGET_SITES`, fetches the latest updates, checks if the database is online, and calls `upsert_manga_entry()`.
@@ -146,97 +142,48 @@ The application exposes a serverless configuration via [vercel.json](file:///D:/
 
 ---
 
-## 3. The New Refused-Cloudinary Chapter Strategy
+## 3. Complete Elimination of Cloudinary Infrastructure
 
-### Current Cloudinary Implementation (To Be Stripped)
+The backend has transitioned to a **100% Pure Metadata/Text Aggregator**, completely removing Cloudinary media storage. Original raw target site cover URLs and chapter page URLs are stored directly in MongoDB and resolved natively by the client app with dynamic headers to bypass hotlinking protections.
 
-Currently, the chapter pages endpoint resolves reading links by downloading the pages and uploading them to Cloudinary.
+### Applied Changes in `core/database.py` ([core/database.py](file:///D:/neomangatest/neomanga-api-server/core/database.py))
 
-1.  **Main Execution Endpoint (`main.py` lines 245–256)**:
+1.  **Removed Cloudinary Upload Imports**:
+    Removed the import of `upload_image_to_cloudinary` from `core.storage`.
+2.  **Cover Ingestion Simplification**:
+    Completely removed the Cloudinary cover uploading logic inside `upsert_manga_entry()`. The thumbnail field is assigned the raw cover URL directly:
     ```python
-    # 3. Upload them to Cloudinary concurrently
-    tasks = [
-        upload_image_to_cloudinary(page_url, "neomanga/chapters/")
-        for page_url in raw_pages
-    ]
-    
-    uploaded_pages = await asyncio.gather(*tasks)
-    uploaded_pages = [p for p in uploaded_pages if p]
-
-    # 4. Save to cache
-    if uploaded_pages:
-        await cache_chapter_pages(chapter_url, uploaded_pages)
+    # Directly assign the raw, original target site cover URL
+    thumbnail_url = manga_data.get("thumbnail", "")
     ```
-2.  **Storage Engine Logic (`core/storage.py` lines 21–74)**:
-    `upload_image_to_cloudinary` downloads the image from the target website using `httpx.AsyncClient` (lines 40–48), wraps the content in `BytesIO`, runs the upload synchronously inside `asyncio.to_thread` (lines 54–62), and returns the secure URL.
-3.  **Database Caching (`core/database.py` lines 147–167)**:
-    `cache_chapter_pages` caches the array of uploaded Cloudinary CDN URLs.
+3.  **Deduplication Fallback logic**:
+    Simplified the profile update block so that it only updates the cover thumbnail if the existing profile has no thumbnail:
+    ```python
+    # Fallback to copy thumbnail if the existing profile has none
+    existing_thumb = existing_manga.get("thumbnail", "")
+    if manga_data.get("thumbnail") and not existing_thumb:
+        update_payload["thumbnail"] = manga_data["thumbnail"]
+    ```
 
-**Problems with the current approach:**
-*   **High Latency**: Uploading 50+ images sequentially or even concurrently via `asyncio.gather` on serverless functions causes timeout errors (HTTP 504) because serverless functions have a execution time limit (typically 10–15 seconds on Vercel free tier).
-*   **Storage Cost**: Chapters containing high-resolution pages consume massive amounts of Cloudinary storage space, quickly exceeding free tier limits.
-*   **Memory Overhead**: Reading multiple images into memory buffer streams (`BytesIO`) concurrently causes spikes in RAM usage, leading to serverless runtime crashes.
+### Applied Changes in `core/storage.py` ([core/storage.py](file:///D:/neomangatest/neomanga-api-server/core/storage.py))
 
-### Refactored Cloudinary Elimination Implementation
-
-To strip chapter downloading/uploading and retain Cloudinary **only** for manga cover thumbnails, the following changes have been implemented:
-
-#### 1. Applied Changes in `main.py` ([main.py](file:///D:/neomangatest/neomanga-api-server/main.py))
-Steps 3, 4, and 5 in the `/api/v1/chapters/pages` handler were replaced to bypass Cloudinary and cache/return raw target URLs directly:
+`core/storage.py` has been deprecated and turned into a stub module. It is no longer executed by any part of the application:
 
 ```python
-        # 2. Scrape raw page URLs
-        raw_pages = await scrape_madara_pages(chapter_url)
-        if not raw_pages:
-            return {
-                "status": "success",
-                "chapter_url": chapter_url,
-                "total_pages": 0,
-                "pages": []
-            }
+# Deprecated: Cloudinary storage support has been completely removed from the backend.
+# The server now operates as a 100% pure metadata/text aggregator utilizing raw target site URLs.
+# This module is retained only for backward compatibility and is not executed.
 
-        # 3. Save to cache directly
-        if raw_pages:
-            await cache_chapter_pages(chapter_url, raw_pages)
+import logging
 
-        # 4. Clean up temporary memory
-        gc.collect()
+logger = logging.getLogger("uvicorn")
 
-        return {
-            "status": "success",
-            "chapter_url": chapter_url,
-            "total_pages": len(raw_pages),
-            "pages": raw_pages
-        }
+def upload_image_to_cloudinary(*args, **kwargs):
+    logger.warning("Call to deprecated upload_image_to_cloudinary function. Bypassing and returning original URL.")
+    if args:
+        return args[0]
+    return ""
 ```
-
-#### 2. Applied Changes in `core/database.py` ([core/database.py](file:///D:/neomangatest/neomanga-api-server/core/database.py))
-Updated the database caching function to store raw target URLs:
-
-*   Keep `upload_image_to_cloudinary()` inside `upsert_manga_entry()` (lines 71–79) to continue cache optimization for cover art.
-*   Modified `cache_chapter_pages()` to reflect that raw target URLs are stored:
-    ```python
-    async def cache_chapter_pages(chapter_url: str, pages: list):
-        """
-        Cache raw target chapter page URLs in MongoDB if online.
-        """
-        if not IS_DB_ONLINE:
-            return
-        try:
-            await chapters_collection.update_one(
-                {"chapter_url": chapter_url},
-                {
-                    "$set": {
-                        "chapter_url": chapter_url,
-                        "pages": pages,
-                        "updated_at": datetime.utcnow().isoformat()
-                    }
-                },
-                upsert=True
-            )
-        except Exception as exc:
-            logger.error(f"Failed to cache chapter pages for {chapter_url}: {str(exc)}")
-    ```
 
 ---
 
@@ -298,10 +245,10 @@ Following the refactoring, the `/api/v1/chapters/pages` endpoint will emit a cle
 
 ### Short-Term Engineering Tasks (Next 1–2 Weeks)
 
-1.  **[COMPLETED] Refactoring the Cloudinary Chapter Upload**: Stripped the concurrent Cloudinary uploading for chapter pages, reducing latency from 15s+ to <1s. Pages are now cached and returned using their raw target URLs.
+1.  **[COMPLETED] Refactoring the Cloudinary Chapter & Cover Uploads**: Stripped all concurrent Cloudinary uploading for chapter pages and cover thumbnails, reducing latency to <1s. Pages and covers are now cached and returned using their raw target URLs. Deprecated `core/storage.py` entirely.
 2.  **VPS / Cloud Migration**:
     *   Deploy the FastAPI application on **Railway** or **Render** to bypass Vercel's serverless timeout limits.
-    *   Configure production environment variables (`MONGO_URI`, `CLOUDINARY_CLOUD_NAME`, etc.) in the deployment console.
+    *   Configure production environment variables (`MONGO_URI`) in the deployment console.
 3.  **Unique MongoDB Indexes**:
     *   Create a unique index on `slug` inside the `manga_catalog` collection.
     *   Create a unique index on `chapter_url` inside the `chapter_pages` collection.
