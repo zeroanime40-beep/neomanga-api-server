@@ -202,7 +202,7 @@ async def get_chapter_pages(
     chapter_url: str = Query(..., description="The direct URL of the specific chapter page to scrape image URLs from")
 ):
     """
-    Get the reading image URLs from a specific chapter page.
+    Get the reading image URLs from a specific chapter page, uploading them to Cloudinary and caching in DB.
     """
     if not chapter_url.startswith(("http://", "https://")):
         from urllib.parse import urljoin
@@ -215,12 +215,53 @@ async def get_chapter_pages(
         )
 
     try:
-        pages = await scrape_madara_pages(chapter_url)
+        import gc
+        import asyncio
+        from core.database import get_cached_chapter_pages, cache_chapter_pages
+        from core.storage import upload_image_to_cloudinary
+
+        # 1. Check cache first
+        cached_pages = await get_cached_chapter_pages(chapter_url)
+        if cached_pages:
+            logger.info(f"[API] Serving cached chapter pages for: {chapter_url}")
+            return {
+                "status": "success",
+                "chapter_url": chapter_url,
+                "total_pages": len(cached_pages),
+                "pages": cached_pages
+            }
+
+        # 2. Scrape raw page URLs
+        raw_pages = await scrape_madara_pages(chapter_url)
+        if not raw_pages:
+            return {
+                "status": "success",
+                "chapter_url": chapter_url,
+                "total_pages": 0,
+                "pages": []
+            }
+
+        # 3. Upload them to Cloudinary concurrently
+        tasks = [
+            upload_image_to_cloudinary(page_url, "neomanga/chapters/")
+            for page_url in raw_pages
+        ]
+        
+        uploaded_pages = await asyncio.gather(*tasks)
+        uploaded_pages = [p for p in uploaded_pages if p]
+
+        # 4. Save to cache
+        if uploaded_pages:
+            await cache_chapter_pages(chapter_url, uploaded_pages)
+
+        # 5. Clean up temporary memory
+        gc.collect()
+
         return {
             "status": "success",
             "chapter_url": chapter_url,
-            "total_pages": len(pages),
-            "pages": pages
+            "total_pages": len(uploaded_pages),
+            "pages": uploaded_pages
         }
     except httpx.TimeoutException as exc:
         raise HTTPException(

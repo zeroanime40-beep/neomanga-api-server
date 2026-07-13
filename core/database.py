@@ -1,9 +1,11 @@
 import os
 import re
 import logging
+import asyncio
 from datetime import datetime
 from urllib.parse import urlparse
 from motor.motor_asyncio import AsyncIOMotorClient
+from core.storage import upload_image_to_cloudinary
 
 logger = logging.getLogger("uvicorn")
 
@@ -18,8 +20,9 @@ client = AsyncIOMotorClient(MONGO_DETAILS, serverSelectionTimeoutMS=1000)
 # Define the database
 database = client.neomanga_db
 
-# Helper collection reference
+# Helper collection references
 manga_collection = database.get_collection("manga_catalog")
+chapters_collection = database.get_collection("chapter_pages")
 
 def generate_slug(title: str) -> str:
     """
@@ -65,6 +68,15 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
         
         now_str = datetime.utcnow().isoformat()
         
+        # Upload cover art to Cloudinary if it's a raw link
+        thumbnail_url = manga_data.get("thumbnail", "")
+        if thumbnail_url and "res.cloudinary.com" not in thumbnail_url:
+            try:
+                cloudinary_url = await upload_image_to_cloudinary(thumbnail_url, "neomanga/covers/")
+                manga_data["thumbnail"] = cloudinary_url
+            except Exception as e:
+                logger.error(f"Failed to upload cover art for {manga_data.get('title')} to Cloudinary: {str(e)}")
+
         source_payload = {
             "url": manga_data["url"],
             "latest_chapter": manga_data["latest_chapter"],
@@ -80,8 +92,9 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
                 f"sources.{source_key}": source_payload,
                 "updated_at": now_str
             }
-            # Fallback to copy thumbnail if the existing profile has none
-            if manga_data.get("thumbnail") and not existing_manga.get("thumbnail"):
+            # Fallback to copy thumbnail if the existing profile has none or has a non-Cloudinary thumbnail
+            existing_thumb = existing_manga.get("thumbnail", "")
+            if manga_data.get("thumbnail") and (not existing_thumb or "res.cloudinary.com" not in existing_thumb):
                 update_payload["thumbnail"] = manga_data["thumbnail"]
                 
             result = await manga_collection.update_one(
@@ -116,3 +129,38 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
     except Exception as exc:
         logger.error(f"Failed to upsert manga entry for {manga_data.get('title')}: {str(exc)}")
         raise
+
+async def get_cached_chapter_pages(chapter_url: str) -> list:
+    """
+    Retrieve cached chapter pages from MongoDB if online.
+    """
+    if not IS_DB_ONLINE:
+        return None
+    try:
+        doc = await chapters_collection.find_one({"chapter_url": chapter_url})
+        if doc:
+            return doc.get("pages")
+    except Exception as exc:
+        logger.error(f"Failed to fetch cached chapter pages for {chapter_url}: {str(exc)}")
+    return None
+
+async def cache_chapter_pages(chapter_url: str, pages: list):
+    """
+    Cache chapter pages secure Cloudinary URLs in MongoDB if online.
+    """
+    if not IS_DB_ONLINE:
+        return
+    try:
+        await chapters_collection.update_one(
+            {"chapter_url": chapter_url},
+            {
+                "$set": {
+                    "chapter_url": chapter_url,
+                    "pages": pages,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            },
+            upsert=True
+        )
+    except Exception as exc:
+        logger.error(f"Failed to cache chapter pages for {chapter_url}: {str(exc)}")
