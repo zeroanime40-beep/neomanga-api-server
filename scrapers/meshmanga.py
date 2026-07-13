@@ -12,10 +12,9 @@ HEADERS = {
 
 async def scrape_meshmanga_latest(site_url: str) -> list[dict]:
     """
-    Scrapes latest updates from MeshManga by fetching the global chapters list
-    and mapping the nested series details.
+    Scrapes latest updates from MeshManga by fetching the series sorted by updated_at.
     """
-    api_url = "https://appswat.com/v2/api/v2/chapters/?page=1"
+    api_url = "https://appswat.com/v2/api/v2/series/?ordering=-updated_at&page=1"
     async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
         response = await client.get(api_url)
         response.raise_for_status()
@@ -23,30 +22,19 @@ async def scrape_meshmanga_latest(site_url: str) -> list[dict]:
         
         results = data.get("results", [])
         updates = []
-        seen_slugs = set()
-        
         for item in results:
-            chapter_num = item.get("chapter", "")
-            serie = item.get("serie")
-            if not isinstance(serie, dict):
+            slug = item.get("slug")
+            if not slug:
                 continue
-                
-            slug = serie.get("slug")
-            if not slug or slug in seen_slugs:
-                continue
-                
-            seen_slugs.add(slug)
-            
-            poster = serie.get("poster") or {}
+            poster = item.get("poster") or {}
             thumbnail = poster.get("thumbnail") or poster.get("medium") or ""
             
             updates.append({
-                "title": serie.get("title", slug),
+                "title": item.get("title", ""),
                 "url": f"https://meshmanga.com/series/{slug}/",
                 "thumbnail": thumbnail,
-                "latest_chapter": f"Ch {chapter_num}" if chapter_num else ""
+                "latest_chapter": None
             })
-            
         return updates
 
 async def scrape_meshmanga_catalog(site_url: str, page: int) -> list[dict]:

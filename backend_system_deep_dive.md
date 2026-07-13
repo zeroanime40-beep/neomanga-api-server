@@ -93,6 +93,13 @@ The system runs `AsyncIOScheduler` from `apscheduler` inside [core/scheduler.py]
 #### Step 7: Vercel Serverless Routing
 The application exposes a serverless configuration via [vercel.json](file:///D:/neomangatest/neomanga-api-server/vercel.json). All routes are routed to `main.py` using `@vercel/python`. During execution on Vercel, the scheduler runs dynamically, and background operations can be manually forced using the `/api/cron-scrape` endpoint, which triggers `fetch_and_sync_latest_updates()` on-demand.
 
+### 1.1 Multi-Source Dispatcher Layout
+To support both Madara-based sites (like Olympus Staff) and client-side Next.js sites (like MeshManga), the server integrates a domain-based dispatcher. 
+*   **Olympus Staff (Madara)**: Standard BeautifulSoup HTML scraper [scrapers/madara_base.py](file:///D:/neomangatest/neomanga-api-server/scrapers/madara_base.py). (Temporarily returns `HTTP 503` during staging to guarantee isolated MeshManga testing).
+*   **MeshManga (Next.js)**: JSON REST API scraper [scrapers/meshmanga.py](file:///D:/neomangatest/neomanga-api-server/scrapers/meshmanga.py) interfacing directly with the Django REST API endpoints at `https://appswat.com/v2/api/v2/`.
+
+By parsing URL parameters (`site_url`, `manga_url`, `chapter_url`), the server dispatches execution to the corresponding parser module dynamically. In Mihon, `MeshMangaExtension` masquerades as `"Team X"` but uses `siteUrl = "https://meshmanga.com"`. This routes all client browse actions to the MeshManga REST scraper, bypassing the app's hardcoded dependencies.
+
 ---
 
 ## 2. Exhaustive Git Log & Evolution Audit
