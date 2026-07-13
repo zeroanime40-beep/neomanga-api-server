@@ -10,3 +10,5 @@ env/
 .idea/
 .vscode/
 *.log
+
+.vercel

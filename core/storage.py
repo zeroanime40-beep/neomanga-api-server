@@ -5,15 +5,16 @@ import asyncio
 import cloudinary
 import cloudinary.uploader
 from io import BytesIO
+from core.config import settings
 
 logger = logging.getLogger("uvicorn")
 
 # Initialize Cloudinary configuration
 # Vercel environment variables are CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
 cloudinary.config(
-    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-    api_key=os.getenv("CLOUDINARY_API_KEY"),
-    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+    api_key=settings.CLOUDINARY_API_KEY,
+    api_secret=settings.CLOUDINARY_API_SECRET,
     secure=True
 )
 
@@ -25,7 +26,7 @@ async def upload_image_to_cloudinary(image_bytes_or_url, folder_path: str) -> st
     then uploads it to Cloudinary.
     Returns the secure URL of the uploaded image.
     """
-    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+    cloud_name = settings.CLOUDINARY_CLOUD_NAME
     if not cloud_name:
         logger.warning("Cloudinary environment variables are not configured. Returning original URL or raising.")
         if isinstance(image_bytes_or_url, str):
@@ -51,6 +52,7 @@ async def upload_image_to_cloudinary(image_bytes_or_url, folder_path: str) -> st
             file_payload = image_bytes_or_url
 
         def _sync_upload():
+            logger.info(f"[Cloudinary] Uploading file payload to folder '{folder_path}' (type: {type(file_payload)})")
             response = cloudinary.uploader.upload(
                 file_payload,
                 folder=folder_path
