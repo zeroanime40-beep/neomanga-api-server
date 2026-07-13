@@ -1,3 +1,4 @@
+# Trigger fresh build for Cloudinary configuration
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
