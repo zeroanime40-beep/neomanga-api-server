@@ -243,3 +243,14 @@ async def get_chapter_pages(
             detail=f"Failed to scrape chapter pages: {str(exc)}"
         )
 
+
+@app.get("/api/cron-scrape")
+async def cron_scrape():
+    """
+    Manually trigger the background scraping/traversal logic.
+    """
+    from core.scheduler import fetch_and_sync_latest_updates
+    await fetch_and_sync_latest_updates()
+    return {"status": "success", "message": "Scraping triggered successfully"}
+
+
