@@ -242,27 +242,18 @@ async def get_chapter_pages(
                 "pages": []
             }
 
-        # 3. Upload them to Cloudinary concurrently
-        tasks = [
-            upload_image_to_cloudinary(page_url, "neomanga/chapters/")
-            for page_url in raw_pages
-        ]
-        
-        uploaded_pages = await asyncio.gather(*tasks)
-        uploaded_pages = [p for p in uploaded_pages if p]
+        # 3. Save to cache directly
+        if raw_pages:
+            await cache_chapter_pages(chapter_url, raw_pages)
 
-        # 4. Save to cache
-        if uploaded_pages:
-            await cache_chapter_pages(chapter_url, uploaded_pages)
-
-        # 5. Clean up temporary memory
+        # 4. Clean up temporary memory
         gc.collect()
 
         return {
             "status": "success",
             "chapter_url": chapter_url,
-            "total_pages": len(uploaded_pages),
-            "pages": uploaded_pages
+            "total_pages": len(raw_pages),
+            "pages": raw_pages
         }
     except httpx.TimeoutException as exc:
         raise HTTPException(

@@ -146,7 +146,7 @@ async def get_cached_chapter_pages(chapter_url: str) -> list:
 
 async def cache_chapter_pages(chapter_url: str, pages: list):
     """
-    Cache chapter pages secure Cloudinary URLs in MongoDB if online.
+    Cache raw target chapter page URLs in MongoDB if online.
     """
     if not IS_DB_ONLINE:
         return
