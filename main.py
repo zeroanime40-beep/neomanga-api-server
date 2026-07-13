@@ -122,8 +122,6 @@ async def get_manga_catalog(
 ):
     """
     Scrape a specific page of the catalog, upsert each item into MongoDB, and return the list.
-    If the source is MeshManga, a read-first cache check is performed. If fresh catalog
-    data exists (< 4 hours old), the cached list is immediately returned.
     Scraped updates are ingested asynchronously in the background.
     """
     if not site_url.startswith(("http://", "https://")):
@@ -146,49 +144,6 @@ async def get_manga_catalog(
         final_page = page
 
     print(f"[Server] Client requested Catalog Page: {final_page} (Mapped from pages={pages} / page={page})")
-
-    # 1. READ-FIRST LOGIC (MeshManga specific cache lookup)
-    if "meshmanga.com" in site_url.lower():
-        if await check_db_online():
-            try:
-                # Query documents with source == "meshmanga" or sources.meshmanga_com exists
-                cursor = manga_collection.find({
-                    "$or": [
-                        {"sources.meshmanga_com": {"$exists": True}},
-                        {"source": "meshmanga"}
-                    ]
-                }).sort("updated_at", -1)
-                cached_docs = await cursor.to_list(length=1000)
-
-                if cached_docs:
-                    latest_doc = cached_docs[0]
-                    updated_at_str = latest_doc.get("updated_at")
-                    if updated_at_str:
-                        latest_updated = datetime.fromisoformat(updated_at_str)
-                        age = datetime.utcnow() - latest_updated
-                        # Cache is fresh (< 4 hours old)
-                        if age.total_seconds() < 4 * 3600:
-                            items = []
-                            for doc in cached_docs:
-                                url = doc.get("sources", {}).get("meshmanga_com", {}).get("url") or doc.get("url", "")
-                                latest_chapter = doc.get("sources", {}).get("meshmanga_com", {}).get("latest_chapter") or doc.get("latest_chapter", "")
-                                items.append({
-                                    "title": doc.get("title", ""),
-                                    "url": url,
-                                    "thumbnail": doc.get("thumbnail", ""),
-                                    "latest_chapter": latest_chapter
-                                })
-                            logger.info(f"[API] Serving cached MeshManga catalog with {len(items)} items (Age: {age.total_seconds() / 3600:.2f} hours)")
-                            return {
-                                "status": "success",
-                                "site_url": site_url,
-                                "page": final_page,
-                                "pages_scraped": final_page,
-                                "count": len(items),
-                                "items": items
-                            }
-            except Exception as cache_exc:
-                logger.error(f"Error querying cache for MeshManga: {str(cache_exc)}")
 
     try:
         if "meshmanga.com" in site_url.lower():
