@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import asyncio
+import time
 from datetime import datetime
 from urllib.parse import urlparse
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,9 +13,16 @@ MONGO_DETAILS = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
 # Global database online flag (None = untested, True = online, False = offline)
 IS_DB_ONLINE = None
+LAST_DB_CHECK_TIME = 0.0
+DB_RETRY_COOLDOWN = 30.0  # 30 seconds connection test retry window
 
-# Initialize AsyncIOMotorClient with 1-second timeout
-client = AsyncIOMotorClient(MONGO_DETAILS, serverSelectionTimeoutMS=1000)
+# Initialize AsyncIOMotorClient with dynamic pooling and raised timeout limits
+client = AsyncIOMotorClient(
+    MONGO_DETAILS,
+    serverSelectionTimeoutMS=3000,
+    maxPoolSize=20,
+    minPoolSize=0
+)
 
 # Define the database
 database = client.neomanga_db
@@ -23,6 +31,57 @@ database = client.neomanga_db
 manga_collection = database.get_collection("manga_catalog")
 chapters_collection = database.get_collection("chapter_pages")
 slug_mappings_collection = database.get_collection("slug_mappings")
+
+async def create_unique_indexes():
+    """
+    Create unique programmatic indexes on manga_catalog.slug and chapter_pages.chapter_url.
+    Wrapped in try-except bounds to prevent startup crashes.
+    """
+    try:
+        await manga_collection.create_index("slug", unique=True)
+        logger.info("[Database] Unique index verified/created on 'manga_catalog.slug'")
+    except Exception as exc:
+        logger.warning(f"[Database] Failed to verify/create unique index on 'manga_catalog.slug': {str(exc)}")
+
+    try:
+        await chapters_collection.create_index("chapter_url", unique=True)
+        logger.info("[Database] Unique index verified/created on 'chapter_pages.chapter_url'")
+    except Exception as exc:
+        logger.warning(f"[Database] Failed to verify/create unique index on 'chapter_pages.chapter_url': {str(exc)}")
+
+async def test_db_connection():
+    """
+    Test MongoDB database connection by issuing a ping command and verifying indexes.
+    """
+    global IS_DB_ONLINE
+    try:
+        # The admin database or the default database can be pinged
+        await database.command("ping")
+        logger.info("MongoDB Connection Test: SUCCESS. Bound to database 'neomanga_db'.")
+        IS_DB_ONLINE = True
+        # Verify/create unique indexes on successful connection
+        await create_unique_indexes()
+        return True
+    except Exception as exc:
+        logger.error(f"MongoDB Connection Test: FAILED. Check if MongoDB is running on localhost:27017. Error: {str(exc)}")
+        IS_DB_ONLINE = False
+        return False
+
+async def check_db_online() -> bool:
+    """
+    Ensure the database connection is tested lazily with a Retry Cooldown.
+    """
+    global IS_DB_ONLINE, LAST_DB_CHECK_TIME
+    current_time = time.time()
+    
+    if IS_DB_ONLINE is None or (not IS_DB_ONLINE and (current_time - LAST_DB_CHECK_TIME) > DB_RETRY_COOLDOWN):
+        logger.info("[Database] Lazily testing/retrying database connection...")
+        LAST_DB_CHECK_TIME = current_time
+        is_online = await test_db_connection()
+        if is_online:
+            await seed_slug_mappings_if_empty()
+            
+    return IS_DB_ONLINE
 
 def generate_slug(title: str) -> str:
     """
@@ -38,32 +97,7 @@ def generate_slug(title: str) -> str:
     slug = slug.strip('-')
     return slug
 
-async def test_db_connection():
-    """
-    Test MongoDB database connection by issuing a ping command.
-    """
-    global IS_DB_ONLINE
-    try:
-        # The admin database or the default database can be pinged
-        await database.command("ping")
-        logger.info("MongoDB Connection Test: SUCCESS. Bound to database 'neomanga_db'.")
-        IS_DB_ONLINE = True
-        return True
-    except Exception as exc:
-        logger.error(f"MongoDB Connection Test: FAILED. Check if MongoDB is running on localhost:27017. Error: {str(exc)}")
-        IS_DB_ONLINE = False
-        return False
 
-async def check_db_online() -> bool:
-    """
-    Ensure the database connection is tested lazily.
-    """
-    global IS_DB_ONLINE
-    if IS_DB_ONLINE is None:
-        is_online = await test_db_connection()
-        if is_online:
-            await seed_slug_mappings_if_empty()
-    return IS_DB_ONLINE
 
 async def seed_slug_mappings_if_empty():
     """
@@ -210,7 +244,7 @@ def infer_chapter_numbers(chapters: list) -> list:
 
 async def upsert_manga_entry(manga_data: dict) -> dict:
     """
-    Upsert a manga entry into the MongoDB collection supporting a unified multi-source schema.
+    Upsert a manga entry atomically into the MongoDB collection supporting a unified multi-source schema.
     Deduplicates manga profiles by using a clean slug generated from the title.
     """
     try:
@@ -225,8 +259,6 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
         source_key = parsed_url.netloc.replace(".", "_")
         
         now_str = datetime.utcnow().isoformat()
-        
-        # Directly assign the raw, original target site cover URL
         thumbnail_url = manga_data.get("thumbnail", "")
 
         source_payload = {
@@ -235,48 +267,37 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
             "updated_at": now_str
         }
         
-        # Check if a document with that slug already exists
-        existing_manga = await manga_collection.find_one({"slug": slug})
-        
-        if existing_manga:
-            # Document exists: update the specific nested source field and updated_at
-            update_payload = {
-                f"sources.{source_key}": source_payload,
-                "updated_at": now_str
+        # Perform single atomic upsert operation
+        result = await manga_collection.update_one(
+            {"slug": slug},
+            {
+                "$set": {
+                    f"sources.{source_key}": source_payload,
+                    "updated_at": now_str
+                },
+                "$setOnInsert": {
+                    "title": manga_data["title"],
+                    "slug": slug,
+                    "thumbnail": thumbnail_url,
+                    "created_at": now_str
+                }
+            },
+            upsert=True
+        )
+
+        if result.upserted_id is not None:
+            return {
+                "status": "inserted",
+                "matched_count": 0,
+                "modified_count": 0,
+                "upserted_id": str(result.upserted_id)
             }
-            # Fallback to copy thumbnail if the existing profile has none
-            existing_thumb = existing_manga.get("thumbnail", "")
-            if manga_data.get("thumbnail") and not existing_thumb:
-                update_payload["thumbnail"] = manga_data["thumbnail"]
-                
-            result = await manga_collection.update_one(
-                {"slug": slug},
-                {"$set": update_payload}
-            )
+        else:
             return {
                 "status": "updated",
                 "matched_count": result.matched_count,
                 "modified_count": result.modified_count,
                 "upserted_id": None
-            }
-        else:
-            # Document does not exist: create the complete initial document structure
-            new_doc = {
-                "title": manga_data["title"],
-                "slug": slug,
-                "thumbnail": manga_data.get("thumbnail", ""),
-                "created_at": now_str,
-                "updated_at": now_str,
-                "sources": {
-                    source_key: source_payload
-                }
-            }
-            result = await manga_collection.insert_one(new_doc)
-            return {
-                "status": "inserted",
-                "matched_count": 0,
-                "modified_count": 0,
-                "upserted_id": str(result.inserted_id)
             }
     except Exception as exc:
         logger.error(f"Failed to upsert manga entry for {manga_data.get('title')}: {str(exc)}")
