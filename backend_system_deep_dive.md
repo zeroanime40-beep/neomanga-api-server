@@ -49,7 +49,7 @@ The FastAPI application ([main.py](file:///D:/neomangatest/neomanga-api-server/m
 *   **`/api/v1/manga/latest`**: Scrapes and returns the most recently updated manga titles from a specified site.
 *   **`/api/v1/manga/catalog`**: Serves paginated index catalogs.
 *   **`/api/v1/manga/details`**: Returns metadata (description, genres) and the complete list of chapters, merged from multiple sources, deduplicated, and strictly ordered from newest (Index 0 = Newest) to oldest.
-*   **`/api/v1/chapters/pages`**: Provides the reading page image URLs for a specific chapter.
+*   **`/api/v1/chapters/pages`**: Provides the reading page image URLs for a specific chapter, incorporating a domain-rewrite fail-safe for backwards compatibility, a 5-second execution limit (`asyncio.wait_for`), and target domain dispatcher routing.
 
 When an HTTPS request arrives, FastAPI extracts query parameters such as `site_url`, `manga_url`, or `chapter_url` and validates their URL scheme (forcing `http://` or `https://`).
 
@@ -103,10 +103,16 @@ To prevent pagination freeze issues in client apps (like Mihon) and eliminate se
 
 ### 1.2 Multi-Source Dispatcher Layout
 To support both Madara-based sites (like Olympus Staff) and client-side Next.js sites (like MeshManga), the server integrates a domain-based dispatcher. 
-*   **Olympus Staff (Madara)**: Standard BeautifulSoup HTML scraper [scrapers/madara_base.py](file:///D:/neomangatest/neomanga-api-server/scrapers/madara_base.py). (Temporarily returns `HTTP 503` during staging to guarantee isolated MeshManga testing).
+*   **Olympus Staff (Madara)**: Standard BeautifulSoup HTML scraper [scrapers/madara_base.py](file:///D:/neomangatest/neomanga-api-server/scrapers/madara_base.py). (Reactivated and fully operational).
 *   **MeshManga (Next.js)**: JSON REST API scraper [scrapers/meshmanga.py](file:///D:/neomangatest/neomanga-api-server/scrapers/meshmanga.py) interfacing directly with the Django REST API endpoints at `https://appswat.com/v2/api/v2/`.
 
-By parsing URL parameters (`site_url`, `manga_url`, `chapter_url`), the server dispatches execution to the corresponding parser module dynamically. In Mihon, `MeshMangaExtension` masquerades as `"Team X"` but uses `siteUrl = "https://meshmanga.com"`. This routes all client browse actions to the MeshManga REST scraper, bypassing the app's hardcoded dependencies.
+By parsing URL parameters (`site_url`, `manga_url`, or `chapter_url`), the server dispatches execution to the corresponding parser module dynamically. In Mihon, `MeshMangaExtension` masquerades as `"Team X"` but uses `siteUrl = "https://meshmanga.com"`. This routes all client browse actions to the MeshManga REST scraper, bypassing the app's hardcoded dependencies.
+
+#### Chapter Page Fetching & Fail-Safe Routing (Hotfixes Applied)
+To guarantee robust operations under high load and serverless runtime constraints:
+1.  **Domain Rewrite Fail-Safe**: Incoming relative chapter URLs prefixed with the extension base domain (e.g., `https://meshmanga.com/series/solo-resurrection/chapter-1/`) are intercepted and corrected to `https://olympustaff.com/series/solo-resurrection/chapter-1/` before checking cache or dispatching. This maintains backwards compatibility for older clients with relative links in their databases.
+2.  **Shortened Fetch Timeouts (5.0s)**: Reduced the HTTP connection timeout from 15.0s to 5.0s inside the scrapers (`madara_base.py` and `meshmanga.py`). In `main.py`, the scraping tasks are wrapped inside an `asyncio.wait_for(..., timeout=5.0)` block, which translates hangs into a standard `504 Gateway Timeout` instead of triggering a Vercel 500 error.
+3.  **Unicode Printing Override**: Raw module-level `print` statements in `madara_base.py` are mapped to a custom function routing output to the uvicorn logger. This prevents `UnicodeEncodeError` crashes on serverless hosts that default to ASCII stdout.
 
 ---
 
