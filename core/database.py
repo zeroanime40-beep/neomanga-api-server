@@ -116,10 +116,12 @@ def extract_chapter_number(title: str, url: str) -> float:
     url_str = url.lower() if url else ""
     title_str = title.lower() if title else ""
 
-    # Priority 1: URL path/slug extraction
-    match = re.search(r'(?:chapters|chapter|الفصل|ch)[/_ -]?([\d.]+)', url_str)
-    if match:
-        return to_float(match.group(1))
+    # Priority 1: URL path/slug extraction (bypassed for MeshManga REST IDs)
+    is_meshmanga = "meshmanga.com" in url_str or "appswat.com" in url_str
+    if not is_meshmanga:
+        match = re.search(r'(?:chapters|chapter|الفصل|ch)[/_ -]?([\d.]+)', url_str)
+        if match:
+            return to_float(match.group(1))
 
     # Priority 2: Title search patterns with keywords
     match = re.search(r'(?:فصل|الفصل|chapter|ch\.?)\s*([\d.]+)', title_str)
