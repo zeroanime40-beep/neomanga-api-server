@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from pymongo import MongoClient
 from core.config import PROJECT_NAME, API_PREFIX
-from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online, manga_collection
+from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online, manga_collection, get_canonical_slug, extract_chapter_number
 import core.database
 from core.scheduler import start_scheduler
 from scrapers.madara_base import scrape_madara_latest, scrape_madara_catalog, scrape_madara_details, scrape_madara_pages
@@ -42,13 +42,6 @@ async def get_latest_manga(site_url: str = Query(..., description="The base URL 
         raise HTTPException(
             status_code=400,
             detail="Invalid URL scheme. The URL must start with http:// or https://"
-        )
-
-    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
-    if "olympus" in site_url.lower():
-        raise HTTPException(
-            status_code=503,
-            detail="Olympus source is temporarily paused for isolated testing"
         )
 
     try:
@@ -130,13 +123,6 @@ async def get_manga_catalog(
             detail="Invalid URL scheme. The URL must start with http:// or https://"
         )
 
-    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
-    if "olympus" in site_url.lower():
-        raise HTTPException(
-            status_code=503,
-            detail="Olympus source is temporarily paused for isolated testing"
-        )
-
     final_page = 1
     if pages is not None:
         final_page = pages
@@ -183,8 +169,6 @@ async def get_manga_catalog(
             status_code=500,
             detail=f"Failed to scrape catalog and ingest: {str(exc)}"
         )
-
-
 @app.get(f"{API_PREFIX}/manga/details")
 async def get_manga_details(
     manga_url: str = Query(..., description="The direct URL of the specific manga page to scrape details from")
@@ -205,22 +189,87 @@ async def get_manga_details(
             detail="Invalid URL scheme. The URL must start with http:// or https://"
         )
 
-    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
-    if "olympus" in manga_url.lower():
-        raise HTTPException(
-            status_code=503,
-            detail="Olympus source is temporarily paused for isolated testing"
-        )
-
+    from urllib.parse import urlparse
+    parsed = urlparse(manga_url)
+    path_parts = [p for p in parsed.path.split("/") if p]
+    if not path_parts:
+        raise HTTPException(status_code=400, detail="Invalid manga URL: missing slug path")
+    slug = path_parts[-1]
+    
     try:
-        if "meshmanga.com" in manga_url.lower():
-            details = await scrape_meshmanga_details(manga_url)
+        canonical_slug = await get_canonical_slug(slug)
+        manga_doc = None
+        if await check_db_online():
+            manga_doc = await manga_collection.find_one({"slug": canonical_slug})
+            
+        sources = []
+        if manga_doc and "sources" in manga_doc:
+            for src_key, src_data in manga_doc["sources"].items():
+                sources.append((src_key, src_data["url"]))
         else:
-            details = await scrape_madara_details(manga_url)
+            src_key = "meshmanga_com" if "meshmanga.com" in manga_url.lower() else "olympustaff_com"
+            sources.append((src_key, manga_url))
+            
+        async def fetch_source_details(source_key: str, url: str) -> Optional[dict]:
+            try:
+                if "meshmanga.com" in url.lower():
+                    return await asyncio.wait_for(scrape_meshmanga_details(url), timeout=5.0)
+                else:
+                    return await asyncio.wait_for(scrape_madara_details(url), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[API] Timeout (5s limit) fetching details for {source_key} at {url}")
+                return None
+            except Exception as e:
+                logger.error(f"[API] Error fetching details for {source_key} at {url}: {str(e)}")
+                return None
+
+        # Scraping concurrently in parallel
+        import asyncio
+        tasks = [fetch_source_details(key, url) for key, url in sources]
+        scraped_results = await asyncio.gather(*tasks)
+        
+        scraped_data = {}
+        for (key, url), result in zip(sources, scraped_results):
+            if result:
+                scraped_data[key] = result
+                
+        if not scraped_data:
+            raise Exception("All target sources failed or timed out during details fetching")
+            
+        # Merge descriptions, genres, and chapters with priority (MeshManga > Olympus Staff)
+        description = ""
+        genres = set()
+        merged_chapters = {}
+        
+        # Sort keys so meshmanga_com is processed last (overwriting olympustaff)
+        sorted_keys = sorted(scraped_data.keys(), key=lambda k: 1 if k == "meshmanga_com" else 0)
+        
+        for key in sorted_keys:
+            details_data = scraped_data[key]
+            if details_data.get("description"):
+                description = details_data["description"]
+            if details_data.get("genres"):
+                genres.update(details_data["genres"])
+            for ch in details_data.get("chapters", []):
+                ch_title = ch.get("title", "")
+                ch_url = ch.get("url", "")
+                ch_num = extract_chapter_number(ch_title, ch_url)
+                merged_chapters[ch_num] = {
+                    "title": ch_title,
+                    "url": ch_url,
+                    "chapter_number": ch_num
+                }
+                
+        # Sort descending (Newest to Oldest)
+        sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["chapter_number"], reverse=True)
+        
         return {
             "status": "success",
             "manga_url": manga_url,
-            **details
+            "description": description,
+            "genres": list(genres),
+            "total_chapters": len(sorted_chapters),
+            "chapters": sorted_chapters
         }
     except httpx.TimeoutException as exc:
         raise HTTPException(
@@ -264,19 +313,12 @@ async def get_chapter_pages(
             detail="Invalid URL scheme. The URL must start with http:// or https://"
         )
 
-    # TEMPORARY SAFEGUARD: Olympus is paused during MeshManga testing
-    if "olympus" in chapter_url.lower():
-        raise HTTPException(
-            status_code=503,
-            detail="Olympus source is temporarily paused for isolated testing"
-        )
-
     try:
         import gc
         import asyncio
         from core.database import get_cached_chapter_pages, cache_chapter_pages
 
-        # 1. Check cache first
+    # 1. Check cache first
         cached_pages = await get_cached_chapter_pages(chapter_url)
         if cached_pages:
             logger.info(f"[API] Serving cached chapter pages for: {chapter_url}")
@@ -288,7 +330,11 @@ async def get_chapter_pages(
             }
 
         # 2. Scrape raw page URLs
-        if "meshmanga.com" in chapter_url.lower():
+        from urllib.parse import urlparse
+        parsed_chapter = urlparse(chapter_url)
+        chapter_domain = parsed_chapter.netloc.lower()
+
+        if "meshmanga.com" in chapter_domain or "appswat.com" in chapter_domain:
             raw_pages = await scrape_meshmanga_pages(chapter_url)
         else:
             raw_pages = await scrape_madara_pages(chapter_url)

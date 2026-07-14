@@ -22,6 +22,7 @@ database = client.neomanga_db
 # Helper collection references
 manga_collection = database.get_collection("manga_catalog")
 chapters_collection = database.get_collection("chapter_pages")
+slug_mappings_collection = database.get_collection("slug_mappings")
 
 def generate_slug(title: str) -> str:
     """
@@ -59,8 +60,78 @@ async def check_db_online() -> bool:
     """
     global IS_DB_ONLINE
     if IS_DB_ONLINE is None:
-        await test_db_connection()
+        is_online = await test_db_connection()
+        if is_online:
+            await seed_slug_mappings_if_empty()
     return IS_DB_ONLINE
+
+async def seed_slug_mappings_if_empty():
+    """
+    Seed the slug_mappings collection from a local JSON file if it is empty.
+    """
+    import json
+    try:
+        count = await slug_mappings_collection.count_documents({})
+        if count == 0:
+            json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "slug_mappings.json")
+            if os.path.exists(json_path):
+                with open(json_path, "r", encoding="utf-8") as f:
+                    mappings = json.load(f)
+                if mappings:
+                    await slug_mappings_collection.insert_many(mappings)
+                    logger.info(f"Successfully seeded {len(mappings)} slug mappings into MongoDB.")
+            else:
+                logger.warning(f"slug_mappings.json not found at {json_path}. Skipping seed.")
+    except Exception as exc:
+        logger.error(f"Failed to seed slug mappings: {str(exc)}")
+
+async def get_canonical_slug(slug: str) -> str:
+    """
+    Looks up the slug mappings collection. Returns the canonical_slug if a match exists, 
+    otherwise returns the input slug.
+    """
+    if not await check_db_online():
+        return slug
+    try:
+        mapping = await slug_mappings_collection.find_one({"slug": slug})
+        if mapping:
+            return mapping.get("canonical_slug", slug)
+    except Exception as exc:
+        logger.error(f"Failed to lookup canonical slug for {slug}: {str(exc)}")
+    return slug
+
+def extract_chapter_number(title: str, url: str) -> float:
+    """
+    Extracts chapter number from title or URL.
+    Prioritizes extraction from the URL path/slug first,
+    then falls back to search patterns with keywords in the Title,
+    and only uses the general numeric fallback as a last resort.
+    """
+    def to_float(val: str) -> float:
+        try:
+            return float(val)
+        except ValueError:
+            return 0.0
+
+    url_str = url.lower() if url else ""
+    title_str = title.lower() if title else ""
+
+    # Priority 1: URL path/slug extraction
+    match = re.search(r'(?:chapters|chapter|الفصل|ch)[/_ -]?([\d.]+)', url_str)
+    if match:
+        return to_float(match.group(1))
+
+    # Priority 2: Title search patterns with keywords
+    match = re.search(r'(?:فصل|الفصل|chapter|ch\.?)\s*([\d.]+)', title_str)
+    if match:
+        return to_float(match.group(1))
+
+    # Priority 3: General numeric fallback in title (last resort)
+    match = re.search(r'([\d.]+)', title_str)
+    if match:
+        return to_float(match.group(1))
+
+    return 0.0
 
 async def upsert_manga_entry(manga_data: dict) -> dict:
     """
@@ -68,7 +139,8 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
     Deduplicates manga profiles by using a clean slug generated from the title.
     """
     try:
-        slug = generate_slug(manga_data["title"])
+        raw_slug = generate_slug(manga_data["title"])
+        slug = await get_canonical_slug(raw_slug)
         
         # Parse the host name to act as a unique key for the source site
         parsed_url = urlparse(manga_data["url"])
