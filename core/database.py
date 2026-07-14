@@ -151,7 +151,10 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
         slug = await get_canonical_slug(raw_slug)
         
         # Parse the host name to act as a unique key for the source site
-        parsed_url = urlparse(manga_data["url"])
+        url = manga_data["url"]
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url.lstrip("/")
+        parsed_url = urlparse(url)
         source_key = parsed_url.netloc.replace(".", "_")
         
         now_str = datetime.utcnow().isoformat()
@@ -160,8 +163,8 @@ async def upsert_manga_entry(manga_data: dict) -> dict:
         thumbnail_url = manga_data.get("thumbnail", "")
 
         source_payload = {
-            "url": manga_data["url"],
-            "latest_chapter": manga_data["latest_chapter"],
+            "url": url,
+            "latest_chapter": manga_data.get("latest_chapter") or "",
             "updated_at": now_str
         }
         

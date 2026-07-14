@@ -202,13 +202,16 @@ async def get_manga_details(
         if await check_db_online():
             manga_doc = await manga_collection.find_one({"slug": canonical_slug})
             
-        sources = []
+        sources = {}
         if manga_doc and "sources" in manga_doc:
             for src_key, src_data in manga_doc["sources"].items():
-                sources.append((src_key, src_data["url"]))
-        else:
-            src_key = "meshmanga_com" if "meshmanga.com" in manga_url.lower() else "olympustaff_com"
-            sources.append((src_key, manga_url))
+                sources[src_key] = src_data["url"]
+        
+        # Ensure we always attempt to scrape both if database doesn't have them or is missing one
+        if "meshmanga_com" not in sources:
+            sources["meshmanga_com"] = f"https://meshmanga.com/series/{canonical_slug}/"
+        if "olympustaff_com" not in sources:
+            sources["olympustaff_com"] = f"https://olympustaff.com/series/{canonical_slug}/"
             
         async def fetch_source_details(source_key: str, url: str) -> Optional[dict]:
             try:
@@ -225,11 +228,11 @@ async def get_manga_details(
 
         # Scraping concurrently in parallel
         import asyncio
-        tasks = [fetch_source_details(key, url) for key, url in sources]
+        tasks = [fetch_source_details(key, url) for key, url in sources.items()]
         scraped_results = await asyncio.gather(*tasks)
         
         scraped_data = {}
-        for (key, url), result in zip(sources, scraped_results):
+        for (key, url), result in zip(sources.items(), scraped_results):
             if result:
                 scraped_data[key] = result
                 
