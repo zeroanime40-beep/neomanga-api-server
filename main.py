@@ -253,8 +253,8 @@ async def get_manga_details(
         description = primary.get("description") or ""
         genres = set(primary.get("genres") or [])
         
-        def normalize_text(text: str) -> str:
-            if not text:
+        def normalize_text(text) -> str:
+            if not isinstance(text, str):
                 return ""
             text = text.lower().strip()
             text = re.sub(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', '', text)
@@ -263,20 +263,35 @@ async def get_manga_details(
             return "".join(re.findall(r'\w+', text))
 
         primary_chapters = primary.get("chapters", [])
+        if not isinstance(primary_chapters, list):
+            primary_chapters = []
+            
         merged_chapters = {}
         
-        # Process Primary Source
+        # Process Primary Source with Defensive Guards
         for ch in primary_chapters:
-            ch_title = ch.get("title", "")
-            ch_url = ch.get("url", "")
-            ch_num = extract_chapter_number(ch_title, ch_url)
-            ch_payload = {
-                "title": ch_title,
-                "url": ch_url,
-                "extracted_number": ch_num
-            }
-            key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
-            merged_chapters[key] = ch_payload
+            try:
+                if not isinstance(ch, dict):
+                    continue
+                ch_title = str(ch.get("title") or "")
+                ch_url = str(ch.get("url") or "")
+                ch_num = extract_chapter_number(ch_title, ch_url)
+                
+                try:
+                    ch_num = float(ch_num)
+                except (TypeError, ValueError):
+                    ch_num = -1.0
+                    
+                ch_payload = {
+                    "title": ch_title,
+                    "url": ch_url,
+                    "extracted_number": ch_num
+                }
+                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                merged_chapters[key] = ch_payload
+            except Exception as loop_exc:
+                logger.warning(f"[API] Skipping corrupted primary chapter item: {str(loop_exc)}")
+                continue
             
         if secondary:
             if not description and secondary.get("description"):
@@ -285,18 +300,34 @@ async def get_manga_details(
                 genres.update(secondary["genres"])
                 
             secondary_chapters = secondary.get("chapters", [])
+            if not isinstance(secondary_chapters, list):
+                secondary_chapters = []
+                
+            # Process Secondary Source with Defensive Guards
             for ch in secondary_chapters:
-                ch_title = ch.get("title", "")
-                ch_url = ch.get("url", "")
-                ch_num = extract_chapter_number(ch_title, ch_url)
-                ch_payload = {
-                    "title": ch_title,
-                    "url": ch_url,
-                    "extracted_number": ch_num
-                }
-                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
-                if key not in merged_chapters:
-                    merged_chapters[key] = ch_payload
+                try:
+                    if not isinstance(ch, dict):
+                        continue
+                    ch_title = str(ch.get("title") or "")
+                    ch_url = str(ch.get("url") or "")
+                    ch_num = extract_chapter_number(ch_title, ch_url)
+                    
+                    try:
+                        ch_num = float(ch_num)
+                    except (TypeError, ValueError):
+                        ch_num = -1.0
+                        
+                    ch_payload = {
+                        "title": ch_title,
+                        "url": ch_url,
+                        "extracted_number": ch_num
+                    }
+                    key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                    if key not in merged_chapters:
+                        merged_chapters[key] = ch_payload
+                except Exception as loop_exc:
+                    logger.warning(f"[API] Skipping corrupted secondary chapter item: {str(loop_exc)}")
+                    continue
                     
         # Sort descending (Newest to Oldest) by extracted number (stable sort)
         sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
