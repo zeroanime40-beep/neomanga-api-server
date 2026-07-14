@@ -171,6 +171,54 @@ async def get_manga_catalog(
             status_code=500,
             detail=f"Failed to scrape catalog and ingest: {str(exc)}"
         )
+def cleanse_cached_chapters(chapters: list) -> list:
+    """
+    On-the-fly deduplication and schema normalization for cached details.
+    Eliminates legacy duplicates before serving fast response to the client.
+    """
+    if not chapters:
+        return []
+    seen = set()
+    cleaned = []
+    
+    def normalize_text(text) -> str:
+        if not isinstance(text, str):
+            return ""
+        text = text.lower().strip()
+        text = re.sub(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', '', text)
+        text = re.sub(r'[أإآ]', 'ا', text)
+        text = text.replace('ة', 'ه').replace('ى', 'ي')
+        return "".join(re.findall(r'\w+', text))
+
+    for ch in chapters:
+        if not isinstance(ch, dict):
+            continue
+        title = str(ch.get("title") or "")
+        url = str(ch.get("url") or "")
+        
+        # Defensive lookup: prefer resolved chapter_number first, fallback to raw extracted_number
+        ch_num = ch.get("chapter_number")
+        if ch_num is None or ch_num == -1.0:
+            ch_num = ch.get("extracted_number")
+        if ch_num is None or ch_num == -1.0:
+            ch_num = extract_chapter_number(title, url)
+            
+        try:
+            ch_num = float(ch_num)
+        except (TypeError, ValueError):
+            ch_num = -1.0
+            
+        key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(title)}"
+        if key not in seen:
+            seen.add(key)
+            # Ensure both keys exist and are consistent
+            ch["chapter_number"] = ch_num
+            ch["extracted_number"] = ch_num
+            cleaned.append(ch)
+            
+    return cleaned
+
+
 def get_slug_candidates(canonical_slug: str, current_slug: str = None) -> list[str]:
     """
     Generate standard candidates for slug variations.
@@ -296,15 +344,19 @@ async def heal_manga_details_background(canonical_slug: str, manga_url: str, sou
             try:
                 ch_title = str(ch.get("title") or "")
                 ch_url = str(ch.get("url") or "")
-                ch_num = ch.get("extracted_number")
-                if ch_num is None:
-                    ch_num = ch.get("chapter_number")
-                if ch_num is None:
+                
+                # Defensive lookup: prefer resolved chapter_number first, fallback to raw extracted_number
+                ch_num = ch.get("chapter_number")
+                if ch_num is None or ch_num == -1.0:
+                    ch_num = ch.get("extracted_number")
+                if ch_num is None or ch_num == -1.0:
                     ch_num = extract_chapter_number(ch_title, ch_url)
+                    
                 try:
                     ch_num = float(ch_num)
                 except (TypeError, ValueError):
                     ch_num = -1.0
+                    
                 key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
                 merged_chapters[key] = {
                     "title": ch_title,
@@ -359,12 +411,11 @@ async def heal_manga_details_background(canonical_slug: str, manga_url: str, sou
     sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
     final_chapters = infer_chapter_numbers(sorted_chapters)
     
-    # Ensure that final_chapters contain both keys after inference too
+    # Enforce strict schema uniformity after running the inference engine
     for ch in final_chapters:
-        if "extracted_number" not in ch:
-            ch["extracted_number"] = ch.get("chapter_number", -1.0)
-        elif "chapter_number" not in ch:
-            ch["chapter_number"] = ch.get("extracted_number", -1.0)
+        val = ch.get("chapter_number", -1.0)
+        ch["chapter_number"] = val
+        ch["extracted_number"] = val
             
     now_str = datetime.utcnow().isoformat()
     cached_sources = [r["source_key"] for r in successful_results]
@@ -462,18 +513,20 @@ async def get_manga_details(
         # Case A: Cache is Fresh -> Serve immediately
         if is_cache_fresh and cached_details:
             logger.info(f"[API] Serving fresh cached details for {canonical_slug}")
+            cleansed = cleanse_cached_chapters(cached_details.get("chapters") or [])
             return {
                 "status": "success",
                 "manga_url": manga_url,
                 "description": cached_details.get("description") or "",
                 "genres": cached_details.get("genres") or [],
-                "total_chapters": cached_details.get("total_chapters") or 0,
-                "chapters": cached_details.get("chapters") or []
+                "total_chapters": len(cleansed),
+                "chapters": cleansed
             }
             
         # Case B: Cache Stale -> Serve immediately, heal in background
         if cached_details:
             logger.info(f"[API] Serving stale cached details for {canonical_slug}. Healing in background.")
+            cleansed = cleanse_cached_chapters(cached_details.get("chapters") or [])
             if background_tasks:
                 background_tasks.add_task(
                     heal_manga_details_background,
@@ -487,8 +540,8 @@ async def get_manga_details(
                 "manga_url": manga_url,
                 "description": cached_details.get("description") or "",
                 "genres": cached_details.get("genres") or [],
-                "total_chapters": cached_details.get("total_chapters") or 0,
-                "chapters": cached_details.get("chapters") or []
+                "total_chapters": len(cleansed),
+                "chapters": cleansed
             }
             
         # Case C: No Cache -> Synchronous Live Fetch
@@ -573,12 +626,11 @@ async def get_manga_details(
         sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
         final_chapters = infer_chapter_numbers(sorted_chapters)
         
-        # Ensure that final_chapters contain both keys after inference too
+        # Enforce strict schema uniformity after running the inference engine
         for ch in final_chapters:
-            if "extracted_number" not in ch:
-                ch["extracted_number"] = ch.get("chapter_number", -1.0)
-            elif "chapter_number" not in ch:
-                ch["chapter_number"] = ch.get("extracted_number", -1.0)
+            val = ch.get("chapter_number", -1.0)
+            ch["chapter_number"] = val
+            ch["extracted_number"] = val
                 
         now_str = datetime.utcnow().isoformat()
         cached_sources = [r["source_key"] for r in successful_results]
