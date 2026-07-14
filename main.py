@@ -214,11 +214,19 @@ async def get_manga_details(
             sources["olympustaff_com"] = f"https://olympustaff.com/series/{canonical_slug}/"
             
         async def fetch_source_details(source_key: str, url: str) -> Optional[dict]:
+            loop = asyncio.get_running_loop()
+            start_time = loop.time()
             try:
                 if "meshmanga.com" in url.lower():
-                    return await asyncio.wait_for(scrape_meshmanga_details(url), timeout=5.0)
+                    result = await asyncio.wait_for(scrape_meshmanga_details(url), timeout=5.0)
                 else:
-                    return await asyncio.wait_for(scrape_madara_details(url), timeout=5.0)
+                    result = await asyncio.wait_for(scrape_madara_details(url), timeout=5.0)
+                
+                latency = loop.time() - start_time
+                if result:
+                    result["latency"] = latency
+                    result["source_key"] = source_key
+                return result
             except asyncio.TimeoutError:
                 logger.warning(f"[API] Timeout (5s limit) fetching details for {source_key} at {url}")
                 return None
@@ -231,52 +239,65 @@ async def get_manga_details(
         tasks = [fetch_source_details(key, url) for key, url in sources.items()]
         scraped_results = await asyncio.gather(*tasks)
         
-        scraped_data = {}
-        for (key, url), result in zip(sources.items(), scraped_results):
-            if result:
-                scraped_data[key] = result
-                
-        if not scraped_data:
+        successful_results = [r for r in scraped_results if r]
+        if not successful_results:
             raise Exception("All target sources failed or timed out during details fetching")
             
-        # Merge descriptions, genres, and chapters with priority (MeshManga > Olympus Staff)
-        description = ""
-        genres = set()
-        merged_chapters = {}
+        # Sort successful results by latency ascending (fastest first)
+        successful_results.sort(key=lambda x: x.get("latency", 999.0))
         
-        # Sort keys so meshmanga_com is processed last (overwriting olympustaff)
-        sorted_keys = sorted(scraped_data.keys(), key=lambda k: 1 if k == "meshmanga_com" else 0)
+        primary = successful_results[0]
+        secondary = successful_results[1] if len(successful_results) > 1 else None
         
-        for key in sorted_keys:
-            details_data = scraped_data[key]
-            if details_data.get("description"):
-                description = details_data["description"]
-            if details_data.get("genres"):
-                genres.update(details_data["genres"])
+        # Populate details from primary
+        description = primary.get("description") or ""
+        genres = set(primary.get("genres") or [])
+        
+        primary_chapters = primary.get("chapters", [])
+        primary_inferred = infer_chapter_numbers(primary_chapters)
+        
+        merged_chapters = {ch["chapter_number"]: {
+            "title": ch.get("title", ""),
+            "url": ch.get("url", ""),
+            "chapter_number": ch["chapter_number"]
+        } for ch in primary_inferred}
+        
+        if secondary:
+            if not description and secondary.get("description"):
+                description = secondary["description"]
+            if secondary.get("genres"):
+                genres.update(secondary["genres"])
+                
+            secondary_chapters = secondary.get("chapters", [])
+            secondary_inferred = infer_chapter_numbers(secondary_chapters)
             
-            source_chapters = details_data.get("chapters", [])
-            inferred_chapters = infer_chapter_numbers(source_chapters)
+            max_primary_ch = max(merged_chapters.keys()) if merged_chapters else -float('inf')
             
-            for ch in inferred_chapters:
-                ch_title = ch.get("title", "")
-                ch_url = ch.get("url", "")
-                ch_num = ch.get("chapter_number", -1.0)
-                merged_chapters[ch_num] = {
-                    "title": ch_title,
-                    "url": ch_url,
+            for ch in secondary_inferred:
+                ch_num = ch["chapter_number"]
+                ch_payload = {
+                    "title": ch.get("title", ""),
+                    "url": ch.get("url", ""),
                     "chapter_number": ch_num
                 }
-                
+                if ch_num > max_primary_ch:
+                    merged_chapters[ch_num] = ch_payload
+                elif ch_num not in merged_chapters:
+                    merged_chapters[ch_num] = ch_payload
+                    
         # Sort descending (Newest to Oldest)
         sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["chapter_number"], reverse=True)
+        
+        # Pass final merged results through infer_chapter_numbers to ensure strict monotonic ascending order
+        final_chapters = infer_chapter_numbers(sorted_chapters)
         
         return {
             "status": "success",
             "manga_url": manga_url,
             "description": description,
             "genres": list(genres),
-            "total_chapters": len(sorted_chapters),
-            "chapters": sorted_chapters
+            "total_chapters": len(final_chapters),
+            "chapters": final_chapters
         }
     except httpx.TimeoutException as exc:
         raise HTTPException(
