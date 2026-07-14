@@ -1,4 +1,4 @@
-# Force new build timestamp: 2026-07-14-13-30
+# Force new build timestamp: 2026-07-14-16-10
 import os
 import re
 import asyncio
@@ -21,13 +21,35 @@ client = MongoClient(mongo_uri)
 
 logger = logging.getLogger("uvicorn")
 
+# Precompiled Regex Patterns for Performance Optimization (P6)
+REGEX_NORMALIZE_CHAPTER = re.compile(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', re.IGNORECASE)
+REGEX_WORD_CHARS = re.compile(r'\w+')
+
+def normalize_text(text) -> str:
+    """
+    Consolidated global helper for title text normalization using precompiled regexes (P6).
+    """
+    if not isinstance(text, str):
+        return ""
+    text = text.lower().strip()
+    text = REGEX_NORMALIZE_CHAPTER.sub('', text)
+    text = text.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+    text = text.replace('ة', 'ه').replace('ى', 'ي')
+    return "".join(REGEX_WORD_CHARS.findall(text))
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: verify database connection
     await test_db_connection()
     start_scheduler()
+    
+    # Process-level connection client configuration (P3)
+    limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+    app.state.http_client = httpx.AsyncClient(limits=limits, follow_redirects=True)
+    
     yield
-    # Shutdown: clean up if needed
+    # Shutdown: clean up shared client
+    await app.state.http_client.aclose()
 
 app = FastAPI(title=PROJECT_NAME, lifespan=lifespan)
 
@@ -48,9 +70,9 @@ async def get_latest_manga(site_url: str = Query(..., description="The base URL 
 
     try:
         if "meshmanga.com" in site_url.lower():
-            updates = await scrape_meshmanga_latest(site_url)
+            updates = await scrape_meshmanga_latest(site_url, client=app.state.http_client)
         else:
-            updates = await scrape_madara_latest(site_url)
+            updates = await scrape_madara_latest(site_url, client=app.state.http_client)
         
         # Ingest to MongoDB securely with Exception Shield
         if await check_db_online():
@@ -135,9 +157,9 @@ async def get_manga_catalog(
 
     try:
         if "meshmanga.com" in site_url.lower():
-            items = await scrape_meshmanga_catalog(site_url, page=final_page)
+            items = await scrape_meshmanga_catalog(site_url, page=final_page, client=app.state.http_client)
         else:
-            items = await scrape_madara_catalog(site_url, page=final_page)
+            items = await scrape_madara_catalog(site_url, page=final_page, client=app.state.http_client)
         
         # 2. ASYNCHRONOUS BACKGROUND WRITES
         if items and background_tasks:
@@ -181,15 +203,6 @@ def cleanse_cached_chapters(chapters: list) -> list:
     seen = set()
     cleaned = []
     
-    def normalize_text(text) -> str:
-        if not isinstance(text, str):
-            return ""
-        text = text.lower().strip()
-        text = re.sub(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', '', text)
-        text = re.sub(r'[أإآ]', 'ا', text)
-        text = text.replace('ة', 'ه').replace('ى', 'ي')
-        return "".join(re.findall(r'\w+', text))
-
     for ch in chapters:
         if not isinstance(ch, dict):
             continue
@@ -241,7 +254,12 @@ def get_slug_candidates(canonical_slug: str, current_slug: str = None) -> list[s
     return candidates
 
 
-async def fetch_source_details_with_fallback(source_key: str, canonical_slug: str, initial_url: str) -> Optional[dict]:
+async def fetch_source_details_with_fallback(
+    source_key: str, 
+    canonical_slug: str, 
+    initial_url: str, 
+    client: Optional[httpx.AsyncClient] = None
+) -> Optional[dict]:
     """
     Resiliently fetch target source details with sequential candidate URL testing.
     """
@@ -265,9 +283,9 @@ async def fetch_source_details_with_fallback(source_key: str, canonical_slug: st
         try:
             logger.info(f"[Fallback Resolver] Attempting fetch for {source_key} with URL: {url}")
             if source_key == "meshmanga_com":
-                result = await asyncio.wait_for(scrape_meshmanga_details(url), timeout=5.0)
+                result = await asyncio.wait_for(scrape_meshmanga_details(url, client=client), timeout=5.0)
             else:
-                result = await asyncio.wait_for(scrape_madara_details(url), timeout=5.0)
+                result = await asyncio.wait_for(scrape_madara_details(url, client=client), timeout=5.0)
                 
             latency = loop.time() - start_time
             if result:
@@ -290,7 +308,13 @@ async def fetch_source_details_with_fallback(source_key: str, canonical_slug: st
     return None
 
 
-async def heal_manga_details_background(canonical_slug: str, manga_url: str, sources: dict, existing_details: Optional[dict]):
+async def heal_manga_details_background(
+    canonical_slug: str, 
+    manga_url: str, 
+    sources: dict, 
+    existing_details: Optional[dict], 
+    client: Optional[httpx.AsyncClient] = None
+):
     """
     Asynchronously scrape sources, merge chapters non-destructively, and update MongoDB details.
     """
@@ -300,7 +324,7 @@ async def heal_manga_details_background(canonical_slug: str, manga_url: str, sou
         
     logger.info(f"[Background Heal] Starting background healing for: {canonical_slug}")
     
-    tasks = [fetch_source_details_with_fallback(key, canonical_slug, url) for key, url in sources.items()]
+    tasks = [fetch_source_details_with_fallback(key, canonical_slug, url, client=client) for key, url in sources.items()]
     scraped_results = await asyncio.gather(*tasks)
     successful_results = [r for r in scraped_results if r]
     
@@ -328,15 +352,6 @@ async def heal_manga_details_background(canonical_slug: str, manga_url: str, sou
             genres.update(existing_details["genres"])
             
     merged_chapters = {}
-    
-    def normalize_text(text) -> str:
-        if not isinstance(text, str):
-            return ""
-        text = text.lower().strip()
-        text = re.sub(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', '', text)
-        text = re.sub(r'[أإآ]', 'ا', text)
-        text = text.replace('ة', 'ه').replace('ى', 'ي')
-        return "".join(re.findall(r'\w+', text))
 
     # 1. Cache chapters (lowest priority)
     if existing_details and "chapters" in existing_details:
@@ -533,7 +548,8 @@ async def get_manga_details(
                     canonical_slug,
                     manga_url,
                     sources,
-                    cached_details
+                    cached_details,
+                    app.state.http_client
                 )
             return {
                 "status": "success",
@@ -547,7 +563,7 @@ async def get_manga_details(
         # Case C: No Cache -> Synchronous Live Fetch
         logger.info(f"[API] No cache found for {canonical_slug}. Fetching synchronously.")
         
-        tasks = [fetch_source_details_with_fallback(key, canonical_slug, url) for key, url in sources.items()]
+        tasks = [fetch_source_details_with_fallback(key, canonical_slug, url, client=app.state.http_client) for key, url in sources.items()]
         scraped_results = await asyncio.gather(*tasks)
         successful_results = [r for r in scraped_results if r]
         
@@ -568,15 +584,6 @@ async def get_manga_details(
                 genres.update(secondary["genres"])
                 
         merged_chapters = {}
-        
-        def normalize_text(text) -> str:
-            if not isinstance(text, str):
-                return ""
-            text = text.lower().strip()
-            text = re.sub(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', '', text)
-            text = re.sub(r'[أإآ]', 'ا', text)
-            text = text.replace('ة', 'ه').replace('ى', 'ي')
-            return "".join(re.findall(r'\w+', text))
 
         if secondary:
             for ch in secondary.get("chapters", []):
@@ -742,9 +749,9 @@ async def get_chapter_pages(
 
         try:
             if "meshmanga.com" in chapter_domain or "appswat.com" in chapter_domain:
-                raw_pages = await asyncio.wait_for(scrape_meshmanga_pages(chapter_url), timeout=5.0)
+                raw_pages = await asyncio.wait_for(scrape_meshmanga_pages(chapter_url, client=app.state.http_client), timeout=5.0)
             else:
-                raw_pages = await asyncio.wait_for(scrape_madara_pages(chapter_url), timeout=5.0)
+                raw_pages = await asyncio.wait_for(scrape_madara_pages(chapter_url, client=app.state.http_client), timeout=5.0)
         except asyncio.TimeoutError:
             raise HTTPException(
                 status_code=504,
@@ -763,8 +770,7 @@ async def get_chapter_pages(
         if raw_pages:
             await cache_chapter_pages(chapter_url, raw_pages)
 
-        # 4. Clean up temporary memory
-        gc.collect()
+        # 4. Clean up temporary memory (gc.collect() call removed)
 
         return {
             "status": "success",

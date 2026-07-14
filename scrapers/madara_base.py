@@ -1,6 +1,8 @@
 import httpx
 import re
 import logging
+import asyncio
+from typing import Optional
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
@@ -17,6 +19,15 @@ HEADERS = {
 }
 
 NSFW_BLOCKLIST = ["+18", "18+", "محتوى غير لائق", "المحتوى غير لائق"]
+
+# Precompiled regex patterns for performance optimization (P6)
+REGEX_THUMBNAIL_SIZE = re.compile(r'-\d+x\d+')
+REGEX_MANGA_ID_SCRIPT = re.compile(r'mangaId\s*=\s*["\']?(\d+)["\']?', re.IGNORECASE)
+REGEX_MANGA_ID_HTML = [
+    re.compile(r'manga_id\s*=\s*["\']?(\d+)["\']?', re.IGNORECASE),
+    re.compile(r'mangaID\s*=\s*["\']?(\d+)["\']?', re.IGNORECASE),
+    re.compile(r'post\s*=\s*["\']?(\d+)["\']?', re.IGNORECASE)
+]
 
 def construct_page_url(base_url: str, page: int) -> str:
     """
@@ -83,15 +94,14 @@ def parse_madara_html(html: str, base_url: str) -> list:
     """
     Parses a single HTML page using Madara / Olympus selectors, applies NSFW filtering,
     and returns a list of dictionaries with title, url, thumbnail, and latest_chapter.
+    Synchronous helper designed to run in background thread via lxml (P1 & P2).
     """
     manga_list = []
     seen_urls = set()
     
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "lxml")
     
     # Locate latest updates / catalog items.
-    # Support traditional Madara themes (.page-item-detail, .manga-item, .post-item, .manga-entry)
-    # as well as Olympus Staff / TS layouts (.uta, .entry-box, .swiper-slide, .bsx, div.listupd div.bs div.bsx)
     if "olympustaff.com" in base_url.lower() and "/series" in base_url.lower():
         containers = soup.select("div.listupd div.bs div.bsx")
     else:
@@ -166,7 +176,7 @@ def parse_madara_html(html: str, base_url: str) -> list:
         
         if thumbnail:
             # Clean WordPress low-res/blurry size suffix (e.g. -300x375)
-            thumbnail = re.sub(r'-\d+x\d+', '', thumbnail)
+            thumbnail = REGEX_THUMBNAIL_SIZE.sub('', thumbnail)
             # Clean Olympus Staff thumbnail prefix to get high-res original cover
             thumbnail = thumbnail.replace("/thumbnail_", "/")
         
@@ -198,296 +208,136 @@ def parse_madara_html(html: str, base_url: str) -> list:
         
     return manga_list
 
-async def scrape_madara_latest(base_url: str) -> list:
+def parse_madara_details_html(html: str, manga_url: str) -> tuple:
     """
-    Asynchronously scrape the latest updates page of a given manga website (Madara or TS/Olympus layout).
-    Extracted elements: title, url, thumbnail, latest_chapter.
-    Strictly filters out entries with NSFW terms or blocked keywords.
+    Synchronous helper to parse description, genres, and manga ID from HTML.
+    Designed to run in background thread via lxml (P1 & P2).
     """
-    print(f"[Scraper] Preparing to fetch latest updates page from {base_url}...")
+    soup = BeautifulSoup(html, "lxml")
     
-    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
-        response = await client.get(base_url)
-        response.raise_for_status()
-        html = response.text
-
-    manga_list = parse_madara_html(html, base_url)
-    print(f"[Scraper] Success: Fetched and parsed {len(manga_list)} items from {base_url}")
-    return manga_list
-
-async def scrape_madara_catalog(base_url: str, page: int) -> list:
-    """
-    Scrapes a specific page of a Madara / Olympus site catalog.
-    """
-    all_manga = []
-    seen_urls = set()
-    
-    page_url = construct_page_url(base_url, page)
-    print(f"[Scraper] Scraping catalog page {page}: {page_url}")
-    
-    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
-        response = await client.get(page_url)
-        response.raise_for_status()
-        html = response.text
-        page_items = parse_madara_html(html, base_url)
-        
-        # De-duplicate items based on url
-        for item in page_items:
-            if item["url"] not in seen_urls:
-                all_manga.append(item)
-                seen_urls.add(item["url"])
+    # 1. Extract Description/Synopsis
+    description = ""
+    for sel in [".summary__content", ".manga-summary", ".description-summary", ".post-content_item", ".review-content"]:
+        desc_el = soup.select_one(sel)
+        if desc_el:
+            text = " ".join(desc_el.get_text().split()).strip()
+            if text:
+                description = text
+                break
                 
-    print(f"[Scraper] Completed catalog page {page} scrape. Total items: {len(all_manga)}")
-    return all_manga
-
-async def scrape_madara_details(manga_url: str) -> dict:
-    """
-    Scrapes the details page of a specific manga.
-    Returns a dictionary containing description, genres, and a list of chapters.
-    Chapters are ordered from oldest (Chapter 1) to newest.
-    """
-    print(f"[Scraper] Preparing to fetch manga details from {manga_url}...")
-    
-    from urllib.parse import urlparse, urlunparse
-    parsed_manga_url = urlparse(manga_url)
-    clean_path = parsed_manga_url.path.rstrip("/")
-    ajax_path = f"{clean_path}/ajax/chapters/"
-    ajax_url = urlunparse((parsed_manga_url.scheme, parsed_manga_url.netloc, ajax_path, "", "", ""))
-    
-    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
-        # First fetch the main page to get description and genres
-        response = await client.get(manga_url)
-        response.raise_for_status()
-        html = response.text
-        
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # 1. Extract Description/Synopsis
-        description = ""
-        for sel in [".summary__content", ".manga-summary", ".description-summary", ".post-content_item", ".review-content"]:
-            desc_el = soup.select_one(sel)
-            if desc_el:
-                text = " ".join(desc_el.get_text().split()).strip()
-                if text:
-                    description = text
-                    break
-                    
-        # 2. Extract Genres
-        genres = []
-        genre_els = soup.select(".genres-content a, .manga-genres a, .summary-content.genres a, .review-author-info a")
-        for el in genre_els:
-            genre_name = el.get_text().strip()
-            if genre_name and genre_name not in genres:
-                genres.append(genre_name)
-                
-        # 3. Extract Manga ID for WordPress admin-ajax.php
-        manga_id = None
-        
-        # A. Check input name="manga_id"
-        manga_id_el = soup.find("input", attrs={"name": "manga_id"})
-        if manga_id_el and manga_id_el.get("value"):
-            manga_id = manga_id_el.get("value").strip()
+    # 2. Extract Genres
+    genres = []
+    genre_els = soup.select(".genres-content a, .manga-genres a, .summary-content.genres a, .review-author-info a")
+    for el in genre_els:
+        genre_name = el.get_text().strip()
+        if genre_name and genre_name not in genres:
+            genres.append(genre_name)
             
-        # B. Check .wp-manga-action-button[data-id]
-        if not manga_id:
-            action_btn = soup.select_one(".wp-manga-action-button[data-id]")
-            if action_btn and action_btn.get("data-id"):
-                manga_id = action_btn.get("data-id").strip()
-                
-        # C. Check elements with data-id or data-post attributes
-        if not manga_id:
-            for selector in ["[data-id]", "[data-post]", "input[id*='manga']"]:
-                el = soup.select_one(selector)
-                if el:
-                    for attr in ["data-id", "data-post", "value"]:
-                        val = el.get(attr)
-                        if val and val.strip().isdigit():
-                            manga_id = val.strip()
-                            break
-                    if manga_id:
+    # 3. Extract Manga ID
+    manga_id = None
+    manga_id_el = soup.find("input", attrs={"name": "manga_id"})
+    if manga_id_el and manga_id_el.get("value"):
+        manga_id = manga_id_el.get("value").strip()
+        
+    if not manga_id:
+        action_btn = soup.select_one(".wp-manga-action-button[data-id]")
+        if action_btn and action_btn.get("data-id"):
+            manga_id = action_btn.get("data-id").strip()
+            
+    if not manga_id:
+        for selector in ["[data-id]", "[data-post]", "input[id*='manga']"]:
+            el = soup.select_one(selector)
+            if el:
+                for attr in ["data-id", "data-post", "value"]:
+                    val = el.get(attr)
+                    if val and val.strip().isdigit():
+                        manga_id = val.strip()
                         break
-                        
-        # D. Check scripts for mangaId / manga_id
-        if not manga_id:
-            for script in soup.find_all("script"):
-                script_text = script.string or ""
-                match = re.search(r'mangaId\s*=\s*["\']?(\d+)["\']?', script_text, re.IGNORECASE)
-                if match:
-                    manga_id = match.group(1)
+                if manga_id:
                     break
                     
-        # E. General regex match on HTML
-        if not manga_id:
-            for pattern in [r'manga_id\s*=\s*["\']?(\d+)["\']?', r'mangaID\s*=\s*["\']?(\d+)["\']?', r'post\s*=\s*["\']?(\d+)["\']?']:
-                match = re.search(pattern, html, re.IGNORECASE)
-                if match:
-                    manga_id = match.group(1)
-                    break
-
-        ajax_chapters_html = None
-        
-        # Method A: admin-ajax.php POST
-        if manga_id:
-            admin_ajax_url = f"{parsed_manga_url.scheme}://{parsed_manga_url.netloc}/wp-admin/admin-ajax.php"
-            try:
-                print(f"[Scraper] Fetching complete chapters list via admin-ajax POST from {admin_ajax_url} for manga ID {manga_id}...")
-                ajax_res = await client.post(
-                    admin_ajax_url,
-                    headers={
-                        "User-Agent": HEADERS["User-Agent"],
-                        "Content-Type": "application/x-www-form-urlencoded"
-                    },
-                    data={
-                        "action": "manga_get_chapters",
-                        "manga": manga_id
-                    },
-                    timeout=5.0
-                )
-                if ajax_res.status_code == 200 and ajax_res.text.strip():
-                    # Validate that response contains actual chapter links
-                    temp_soup = BeautifulSoup(ajax_res.text, "html.parser")
-                    temp_anchors = temp_soup.select(".wp-manga-chapter a, .chapter-link, .list-chapter a, .chapters a")
-                    if not temp_anchors:
-                        temp_anchors = [a for a in temp_soup.select("a") if a.get("href") and "/chapter/" in a.get("href").lower()]
-                    if temp_anchors:
-                        ajax_chapters_html = ajax_res.text
-                        print(f"[Scraper] Successfully loaded {len(temp_anchors)} chapters from admin-ajax.")
-                    else:
-                        print("[Scraper] admin-ajax response returned no chapter elements. Trying other methods...")
-                else:
-                    print(f"[Scraper] admin-ajax POST returned status {ajax_res.status_code}")
-            except Exception as admin_exc:
-                print(f"[Scraper] admin-ajax fetch failed: {str(admin_exc)}")
+    if not manga_id:
+        for script in soup.find_all("script"):
+            script_text = script.string or ""
+            match = REGEX_MANGA_ID_SCRIPT.search(script_text)
+            if match:
+                manga_id = match.group(1)
+                break
                 
-        # Method B: Path AJAX Fallback
-        if not ajax_chapters_html:
-            try:
-                print(f"[Scraper] Fetching chapters via path AJAX POST from {ajax_url}...")
-                ajax_res = await client.post(ajax_url)
-                if ajax_res.status_code == 200 and ajax_res.text.strip():
-                    ajax_chapters_html = ajax_res.text
-                else:
-                    print(f"[Scraper] Path AJAX POST returned status {ajax_res.status_code}. Trying GET...")
-                    ajax_res = await client.get(ajax_url)
-                    if ajax_res.status_code == 200 and ajax_res.text.strip():
-                        ajax_chapters_html = ajax_res.text
-            except Exception as path_exc:
-                print(f"[Scraper] Path AJAX fetch failed: {str(path_exc)}")
-
-        chapters = []
-        seen_chapter_urls = set()
-        manga_base_path = manga_url.rstrip("/").split("?")[0]
-
-        def parse_anchors(soup_obj):
-            page_chapters = []
-            container_selectors = [
-                "#chaptersContainer",
-                ".enhanced-chapters-grid",
-                ".enhanced-chapters-section",
-                ".listing-chapters_wrap",
-                ".manga-chapters-list",
-                ".wp-manga-chapter-container",
-                ".chapters-list",
-                ".page-content-listing",
-                ".manga-chapters",
-                ".row-content-chapter",
-                "#chapters-list"
-            ]
-            chapter_container = None
-            for sel in container_selectors:
-                element = soup_obj.select_one(sel)
-                if element:
-                    chapter_container = element
-                    break
-            target_soup = chapter_container if chapter_container else soup_obj
-            
-            anchors = target_soup.select(".wp-manga-chapter a, .chapter-link, .list-chapter a, .chapters a")
-            if not anchors:
-                anchors = [a for a in target_soup.select("a") if a.get("href") and "/chapter/" in a.get("href").lower()]
+    if not manga_id:
+        for pattern in REGEX_MANGA_ID_HTML:
+            match = pattern.search(html)
+            if match:
+                manga_id = match.group(1)
+                break
                 
-            for a in anchors:
-                href = a.get("href", "").strip()
-                if not href or href == "#":
-                    continue
-                chapter_url = urljoin(manga_url, href)
-                if chapter_url in seen_chapter_urls:
-                    continue
-                    
-                # Ensure the chapter URL belongs to the target manga series path hierarchy
-                if not (chapter_url == manga_base_path or 
-                        chapter_url.startswith(manga_base_path + "/") or 
-                        chapter_url.startswith(manga_base_path + "?")):
-                    continue
-                    
-                title_text = " ".join(a.get_text().split())
-                if not title_text:
-                    title_text = "Chapter"
-                    
-                page_chapters.append({
-                    "title": title_text,
-                    "url": chapter_url
-                })
-                seen_chapter_urls.add(chapter_url)
-            return page_chapters
+    return description, genres, manga_id
 
-        # Compile all chapters
-        if ajax_chapters_html:
-            chapters.extend(parse_anchors(BeautifulSoup(ajax_chapters_html, "html.parser")))
-            
-        if not chapters:
-            print("[Scraper] No chapters found via AJAX. Parsing main page HTML and running sequential traversal...")
-            
-            page_num = 1
-            while True:
-                if page_num == 1:
-                    page_soup = soup
-                else:
-                    page_url = f"{manga_url}?page={page_num}"
-                    try:
-                        print(f"[Scraper] Fetching details page {page_num}: {page_url}")
-                        res_page = await client.get(page_url)
-                        if res_page.status_code != 200:
-                            print(f"[Scraper] Details page {page_num} returned status {res_page.status_code}. Terminating traversal.")
-                            break
-                        page_soup = BeautifulSoup(res_page.text, "html.parser")
-                    except Exception as page_exc:
-                        print(f"[Scraper] Failed to fetch details page {page_num}: {str(page_exc)}. Terminating traversal.")
-                        break
-                
-                page_ch = parse_anchors(page_soup)
-                if not page_ch:
-                    print(f"[Scraper] No chapters found on details page {page_num}. Terminating traversal.")
-                    break
-                
-                print(f"[Scraper] Found {len(page_ch)} chapters on details page {page_num}.")
-                chapters.extend(page_ch)
-                page_num += 1
-
-    # Standard Madara list has chapters descending (latest at top).
-    # We reverse it to order from oldest to newest.
-    chapters.reverse()
-    
-    print(f"[Scraper] Success: Fetched details for {manga_url}. Total chapters found: {len(chapters)}")
-    return {
-        "description": description,
-        "genres": genres,
-        "total_chapters": len(chapters),
-        "chapters": chapters
-    }
-
-
-async def scrape_madara_pages(chapter_url: str) -> list:
+def parse_madara_chapters_html(html: str, manga_url: str, seen_chapter_urls: set) -> list:
     """
-    Asynchronously scrape reading image URLs from a specific chapter page.
+    Synchronous helper to parse chapter anchor elements.
+    Designed to run in background thread via lxml (P1 & P2).
     """
-    print(f"[Scraper] Preparing to fetch chapter pages from {chapter_url}...")
+    soup_obj = BeautifulSoup(html, "lxml")
+    manga_base_path = manga_url.rstrip("/").split("?")[0]
     
-    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
-        response = await client.get(chapter_url)
-        response.raise_for_status()
-        html = response.text
+    page_chapters = []
+    container_selectors = [
+        "#chaptersContainer",
+        ".enhanced-chapters-grid",
+        ".enhanced-chapters-section",
+        ".listing-chapters_wrap",
+        ".manga-chapters-list",
+        ".wp-manga-chapter-container",
+        ".chapters-list",
+        ".page-content-listing",
+        ".manga-chapters",
+        ".row-content-chapter",
+        "#chapters-list"
+    ]
+    chapter_container = None
+    for sel in container_selectors:
+        element = soup_obj.select_one(sel)
+        if element:
+            chapter_container = element
+            break
+    target_soup = chapter_container if chapter_container else soup_obj
+    
+    anchors = target_soup.select(".wp-manga-chapter a, .chapter-link, .list-chapter a, .chapters a")
+    if not anchors:
+        anchors = [a for a in target_soup.select("a") if a.get("href") and "/chapter/" in a.get("href").lower()]
         
-    soup = BeautifulSoup(html, "html.parser")
+    for a in anchors:
+        href = a.get("href", "").strip()
+        if not href or href == "#":
+            continue
+        chapter_url = urljoin(manga_url, href)
+        if chapter_url in seen_chapter_urls:
+            continue
+            
+        # Ensure the chapter URL belongs to the target manga series path hierarchy
+        if not (chapter_url == manga_base_path or 
+                chapter_url.startswith(manga_base_path + "/") or 
+                chapter_url.startswith(manga_base_path + "?")):
+            continue
+            
+        title_text = " ".join(a.get_text().split())
+        if not title_text:
+            title_text = "Chapter"
+            
+        page_chapters.append({
+            "title": title_text,
+            "url": chapter_url
+        })
+        seen_chapter_urls.add(chapter_url)
+    return page_chapters
+
+def parse_madara_pages_html(html: str, chapter_url: str) -> list:
+    """
+    Synchronous helper to parse image page URLs from chapter HTML.
+    Designed to run in background thread via lxml (P1 & P2).
+    """
+    soup = BeautifulSoup(html, "lxml")
     
     # Target image containers commonly used in Madara and custom themes
     img_selectors = [
@@ -498,6 +348,7 @@ async def scrape_madara_pages(chapter_url: str) -> list:
         ".read-container img",
         ".chapter-content img",
         ".entry-content img",
+        ".post-content img",
     ]
     
     seen_elements = set()
@@ -568,7 +419,227 @@ async def scrape_madara_pages(chapter_url: str) -> list:
         if absolute_url not in image_urls:
             image_urls.append(absolute_url)
             
-    print(f"[Scraper] Success: Extracted {len(image_urls)} page image URLs from {chapter_url}")
     return image_urls
 
+async def scrape_madara_latest(base_url: str, client: Optional[httpx.AsyncClient] = None) -> list:
+    """
+    Asynchronously scrape the latest updates page of a given manga website (Madara or TS/Olympus layout).
+    """
+    print(f"[Scraper] Preparing to fetch latest updates page from {base_url}...")
+    
+    if client is not None:
+        response = await client.get(base_url, headers=HEADERS, timeout=5.0)
+        response.raise_for_status()
+        html = response.text
+    else:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as local_client:
+            response = await local_client.get(base_url)
+            response.raise_for_status()
+            html = response.text
 
+    manga_list = await asyncio.to_thread(parse_madara_html, html, base_url)
+    print(f"[Scraper] Success: Fetched and parsed {len(manga_list)} items from {base_url}")
+    return manga_list
+
+async def scrape_madara_catalog(base_url: str, page: int, client: Optional[httpx.AsyncClient] = None) -> list:
+    """
+    Scrapes a specific page of a Madara / Olympus site catalog.
+    """
+    all_manga = []
+    seen_urls = set()
+    
+    page_url = construct_page_url(base_url, page)
+    print(f"[Scraper] Scraping catalog page {page}: {page_url}")
+    
+    if client is not None:
+        response = await client.get(page_url, headers=HEADERS, timeout=5.0)
+        response.raise_for_status()
+        html = response.text
+    else:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as local_client:
+            response = await local_client.get(page_url)
+            response.raise_for_status()
+            html = response.text
+            
+    page_items = await asyncio.to_thread(parse_madara_html, html, base_url)
+    
+    # De-duplicate items based on url
+    for item in page_items:
+        if item["url"] not in seen_urls:
+            all_manga.append(item)
+            seen_urls.add(item["url"])
+                
+    print(f"[Scraper] Completed catalog page {page} scrape. Total items: {len(all_manga)}")
+    return all_manga
+
+async def scrape_madara_details(manga_url: str, client: Optional[httpx.AsyncClient] = None) -> dict:
+    """
+    Scrapes the details page of a specific manga.
+    Returns a dictionary containing description, genres, and a list of chapters.
+    """
+    print(f"[Scraper] Preparing to fetch manga details from {manga_url}...")
+    
+    from urllib.parse import urlparse, urlunparse
+    parsed_manga_url = urlparse(manga_url)
+    clean_path = parsed_manga_url.path.rstrip("/")
+    ajax_path = f"{clean_path}/ajax/chapters/"
+    ajax_url = urlunparse((parsed_manga_url.scheme, parsed_manga_url.netloc, ajax_path, "", "", ""))
+    
+    active_client = client
+    client_is_shared = active_client is not None
+    
+    if not client_is_shared:
+        active_client = httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True)
+        
+    try:
+        # First fetch the main page to get description and genres
+        if client_is_shared:
+            response = await active_client.get(manga_url, headers=HEADERS, timeout=5.0)
+        else:
+            response = await active_client.get(manga_url)
+            
+        response.raise_for_status()
+        html = response.text
+        
+        # Parse synopsis metadata off the event loop
+        description, genres, manga_id = await asyncio.to_thread(parse_madara_details_html, html, manga_url)
+
+        ajax_chapters_html = None
+        
+        # Method A: admin-ajax.php POST
+        if manga_id:
+            admin_ajax_url = f"{parsed_manga_url.scheme}://{parsed_manga_url.netloc}/wp-admin/admin-ajax.php"
+            try:
+                print(f"[Scraper] Fetching complete chapters list via admin-ajax POST from {admin_ajax_url} for manga ID {manga_id}...")
+                if client_is_shared:
+                    ajax_res = await active_client.post(
+                        admin_ajax_url,
+                        headers={
+                            "User-Agent": HEADERS["User-Agent"],
+                            "Content-Type": "application/x-www-form-urlencoded"
+                        },
+                        data={
+                            "action": "manga_get_chapters",
+                            "manga": manga_id
+                        },
+                        timeout=5.0
+                    )
+                else:
+                    ajax_res = await active_client.post(
+                        admin_ajax_url,
+                        headers={
+                            "User-Agent": HEADERS["User-Agent"],
+                            "Content-Type": "application/x-www-form-urlencoded"
+                        },
+                        data={
+                            "action": "manga_get_chapters",
+                            "manga": manga_id
+                        }
+                    )
+                if ajax_res.status_code == 200 and ajax_res.text.strip():
+                    temp_soup = BeautifulSoup(ajax_res.text, "lxml")
+                    temp_anchors = temp_soup.select(".wp-manga-chapter a, .chapter-link, .list-chapter a, .chapters a")
+                    if not temp_anchors:
+                        temp_anchors = [a for a in temp_soup.select("a") if a.get("href") and "/chapter/" in a.get("href").lower()]
+                    if temp_anchors:
+                        ajax_chapters_html = ajax_res.text
+                        print(f"[Scraper] Successfully loaded {len(temp_anchors)} chapters from admin-ajax.")
+                    else:
+                        print("[Scraper] admin-ajax response returned no chapter elements. Trying other methods...")
+                else:
+                    print(f"[Scraper] admin-ajax POST returned status {ajax_res.status_code}")
+            except Exception as admin_exc:
+                print(f"[Scraper] admin-ajax fetch failed: {str(admin_exc)}")
+                
+        # Method B: Path AJAX Fallback
+        if not ajax_chapters_html:
+            try:
+                print(f"[Scraper] Fetching chapters via path AJAX POST from {ajax_url}...")
+                if client_is_shared:
+                    ajax_res = await active_client.post(ajax_url, headers=HEADERS, timeout=5.0)
+                else:
+                    ajax_res = await active_client.post(ajax_url)
+                if ajax_res.status_code == 200 and ajax_res.text.strip():
+                    ajax_chapters_html = ajax_res.text
+                else:
+                    print(f"[Scraper] Path AJAX POST returned status {ajax_res.status_code}. Trying GET...")
+                    if client_is_shared:
+                        ajax_res = await active_client.get(ajax_url, headers=HEADERS, timeout=5.0)
+                    else:
+                        ajax_res = await active_client.get(ajax_url)
+                    if ajax_res.status_code == 200 and ajax_res.text.strip():
+                        ajax_chapters_html = ajax_res.text
+            except Exception as path_exc:
+                print(f"[Scraper] Path AJAX fetch failed: {str(path_exc)}")
+
+        chapters = []
+        seen_chapter_urls = set()
+        
+        # Compile all chapters
+        if ajax_chapters_html:
+            parsed_ch = await asyncio.to_thread(parse_madara_chapters_html, ajax_chapters_html, manga_url, seen_chapter_urls)
+            chapters.extend(parsed_ch)
+            
+        if not chapters:
+            print("[Scraper] No chapters found via AJAX. Parsing main page HTML and running sequential traversal...")
+            
+            page_num = 1
+            while True:
+                if page_num == 1:
+                    parsed_ch = await asyncio.to_thread(parse_madara_chapters_html, html, manga_url, seen_chapter_urls)
+                else:
+                    page_url = f"{manga_url}?page={page_num}"
+                    try:
+                        print(f"[Scraper] Fetching details page {page_num}: {page_url}")
+                        if client_is_shared:
+                            res_page = await active_client.get(page_url, headers=HEADERS, timeout=5.0)
+                        else:
+                            res_page = await active_client.get(page_url)
+                            
+                        if res_page.status_code != 200:
+                            print(f"[Scraper] Details page {page_num} returned status {res_page.status_code}. Terminating traversal.")
+                            break
+                        parsed_ch = await asyncio.to_thread(parse_madara_chapters_html, res_page.text, manga_url, seen_chapter_urls)
+                    except Exception as page_exc:
+                        print(f"[Scraper] Failed to fetch details page {page_num}: {str(page_exc)}. Terminating traversal.")
+                        break
+                
+                if not parsed_ch:
+                    print(f"[Scraper] No chapters found on details page {page_num}. Terminating traversal.")
+                    break
+                
+                print(f"[Scraper] Found {len(parsed_ch)} chapters on details page {page_num}.")
+                chapters.extend(parsed_ch)
+                page_num += 1
+
+        chapters.reverse()
+        print(f"[Scraper] Success: Fetched details for {manga_url}. Total chapters found: {len(chapters)}")
+        return {
+            "description": description,
+            "genres": genres,
+            "total_chapters": len(chapters),
+            "chapters": chapters
+        }
+    finally:
+        if not client_is_shared:
+            await active_client.aclose()
+
+async def scrape_madara_pages(chapter_url: str, client: Optional[httpx.AsyncClient] = None) -> list:
+    """
+    Asynchronously scrape reading image URLs from a specific chapter page.
+    """
+    print(f"[Scraper] Preparing to fetch chapter pages from {chapter_url}...")
+    
+    if client is not None:
+        response = await client.get(chapter_url, headers=HEADERS, timeout=5.0)
+        response.raise_for_status()
+        html = response.text
+    else:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as local_client:
+            response = await local_client.get(chapter_url)
+            response.raise_for_status()
+            html = response.text
+        
+    image_urls = await asyncio.to_thread(parse_madara_pages_html, html, chapter_url)
+    print(f"[Scraper] Success: Extracted {len(image_urls)} page image URLs from {chapter_url}")
+    return image_urls

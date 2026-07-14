@@ -9,6 +9,15 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger("uvicorn")
 
+# Precompiled Regex Patterns for Performance Optimization (P6)
+REGEX_SLUG_SEPARATORS = re.compile(r'[\s\-_]+')
+REGEX_SLUG_CLEAN = re.compile(r'[^\w\-]')
+
+REGEX_URL_CHAPTER = re.compile(r'(?:chapters|chapter|الفصل|ch)[/_ -]?([\d.]+)', re.IGNORECASE)
+REGEX_URL_TRAILING_NUMBER = re.compile(r'/([\d.]+)/?$', re.IGNORECASE)
+REGEX_TITLE_CHAPTER = re.compile(r'(?:فصل|الفصل|chapter|ch\.?)\s*([\d.]+)', re.IGNORECASE)
+REGEX_GENERAL_NUMBER = re.compile(r'([\d.]+)', re.IGNORECASE)
+
 MONGO_DETAILS = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
 # Global database online flag (None = untested, True = online, False = offline)
@@ -90,9 +99,9 @@ def generate_slug(title: str) -> str:
     """
     slug = title.lower().strip()
     # Replace spaces, hyphens, and underscores with a single hyphen
-    slug = re.sub(r'[\s\-_]+', '-', slug)
+    slug = REGEX_SLUG_SEPARATORS.sub('-', slug)
     # Strip any character that is not a word character (alphanumeric) or hyphen
-    slug = re.sub(r'[^\w\-]', '', slug)
+    slug = REGEX_SLUG_CLEAN.sub('', slug)
     # Remove leading/trailing hyphens
     slug = slug.strip('-')
     return slug
@@ -154,22 +163,22 @@ def extract_chapter_number(title: str, url: str) -> float:
     is_meshmanga = "meshmanga.com" in url_str or "appswat.com" in url_str
     if not is_meshmanga:
         # A. Check for chapter/ch prefix patterns
-        match = re.search(r'(?:chapters|chapter|الفصل|ch)[/_ -]?([\d.]+)', url_str)
+        match = REGEX_URL_CHAPTER.search(url_str)
         if match:
             return to_float(match.group(1))
 
         # B. Check for raw trailing number patterns (e.g. /solo-resurrection/1 or /solo-resurrection/97/)
-        match = re.search(r'/([\d.]+)/?$', url_str)
+        match = REGEX_URL_TRAILING_NUMBER.search(url_str)
         if match:
             return to_float(match.group(1))
 
     # Priority 2: Title search patterns with keywords
-    match = re.search(r'(?:فصل|الفصل|chapter|ch\.?)\s*([\d.]+)', title_str)
+    match = REGEX_TITLE_CHAPTER.search(title_str)
     if match:
         return to_float(match.group(1))
 
     # Priority 3: General numeric fallback in title (last resort)
-    match = re.search(r'([\d.]+)', title_str)
+    match = REGEX_GENERAL_NUMBER.search(title_str)
     if match:
         return to_float(match.group(1))
 
