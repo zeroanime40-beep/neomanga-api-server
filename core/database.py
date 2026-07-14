@@ -119,7 +119,13 @@ def extract_chapter_number(title: str, url: str) -> float:
     # Priority 1: URL path/slug extraction (bypassed for MeshManga REST IDs)
     is_meshmanga = "meshmanga.com" in url_str or "appswat.com" in url_str
     if not is_meshmanga:
+        # A. Check for chapter/ch prefix patterns
         match = re.search(r'(?:chapters|chapter|الفصل|ch)[/_ -]?([\d.]+)', url_str)
+        if match:
+            return to_float(match.group(1))
+
+        # B. Check for raw trailing number patterns (e.g. /solo-resurrection/1 or /solo-resurrection/97/)
+        match = re.search(r'/([\d.]+)/?$', url_str)
         if match:
             return to_float(match.group(1))
 
