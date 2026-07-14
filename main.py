@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from pymongo import MongoClient
 from core.config import PROJECT_NAME, API_PREFIX
-from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online, manga_collection, get_canonical_slug, extract_chapter_number
+from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online, manga_collection, get_canonical_slug, extract_chapter_number, infer_chapter_numbers
 import core.database
 from core.scheduler import start_scheduler
 from scrapers.madara_base import scrape_madara_latest, scrape_madara_catalog, scrape_madara_details, scrape_madara_pages
@@ -253,10 +253,14 @@ async def get_manga_details(
                 description = details_data["description"]
             if details_data.get("genres"):
                 genres.update(details_data["genres"])
-            for ch in details_data.get("chapters", []):
+            
+            source_chapters = details_data.get("chapters", [])
+            inferred_chapters = infer_chapter_numbers(source_chapters)
+            
+            for ch in inferred_chapters:
                 ch_title = ch.get("title", "")
                 ch_url = ch.get("url", "")
-                ch_num = extract_chapter_number(ch_title, ch_url)
+                ch_num = ch.get("chapter_number", -1.0)
                 merged_chapters[ch_num] = {
                     "title": ch_title,
                     "url": ch_url,

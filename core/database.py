@@ -139,7 +139,74 @@ def extract_chapter_number(title: str, url: str) -> float:
     if match:
         return to_float(match.group(1))
 
-    return 0.0
+    return -1.0
+
+def infer_chapter_numbers(chapters: list) -> list:
+    """
+    Infers missing chapter numbers (represented by -1.0) using lookahead/lookbehind context,
+    enforcing a strictly monotonic ascending sequence of floats.
+    Input format: list of dicts, in descending chronological order (newest first).
+    Output format: list of dicts, in descending chronological order (newest first).
+    """
+    if not chapters:
+        return []
+
+    # 1. Reverse to ascending chronological order (oldest first)
+    asc_ch = list(reversed(chapters))
+    n = len(asc_ch)
+
+    # Helper: read/write chapter float
+    def get_num(idx: int) -> float:
+        ch = asc_ch[idx]
+        if "chapter_number" in ch:
+            return ch["chapter_number"]
+        ch_title = ch.get("title", "")
+        ch_url = ch.get("url", "")
+        val = extract_chapter_number(ch_title, ch_url)
+        ch["chapter_number"] = val
+        return val
+
+    # Find first valid index (value != -1.0)
+    first_valid_idx = -1
+    for i in range(n):
+        if get_num(i) != -1.0:
+            first_valid_idx = i
+            break
+
+    # Scenario A: No valid chapter number exists in the entire list
+    if first_valid_idx == -1:
+        for i in range(n):
+            asc_ch[i]["chapter_number"] = float(i + 1)
+        return list(reversed(asc_ch))
+
+    # Scenario B: Extrapolate backwards for any early -1.0 (prologues/specials)
+    v = get_num(first_valid_idx)
+    if first_valid_idx > 0:
+        if v <= 0.0:
+            delta = 1.0
+        else:
+            delta = v / (first_valid_idx + 1)
+        for i in range(first_valid_idx):
+            asc_ch[i]["chapter_number"] = v - (first_valid_idx - i) * delta
+
+    # Scenario C: Forward monotonic enforcement
+    last_valid_val = get_num(first_valid_idx)
+    for i in range(first_valid_idx + 1, n):
+        parsed_val = get_num(i)
+        if parsed_val == -1.0:
+            inferred = last_valid_val + 1.0
+            asc_ch[i]["chapter_number"] = inferred
+            last_valid_val = inferred
+        else:
+            if parsed_val <= last_valid_val:
+                corrected = last_valid_val + 0.01
+                asc_ch[i]["chapter_number"] = corrected
+                last_valid_val = corrected
+            else:
+                last_valid_val = parsed_val
+
+    return list(reversed(asc_ch))
+
 
 async def upsert_manga_entry(manga_data: dict) -> dict:
     """
