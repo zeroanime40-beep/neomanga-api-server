@@ -1,5 +1,7 @@
-# Force new build timestamp: 2026-07-13-12-45
+# Force new build timestamp: 2026-07-14-13-30
 import os
+import re
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 from datetime import datetime
@@ -169,12 +171,242 @@ async def get_manga_catalog(
             status_code=500,
             detail=f"Failed to scrape catalog and ingest: {str(exc)}"
         )
+def get_slug_candidates(canonical_slug: str, current_slug: str = None) -> list[str]:
+    """
+    Generate standard candidates for slug variations.
+    """
+    candidates = []
+    if current_slug and current_slug not in candidates:
+        candidates.append(current_slug)
+    if canonical_slug not in candidates:
+        candidates.append(canonical_slug)
+        
+    base_slug = canonical_slug
+    for suffix in ["-manga", "-arabic"]:
+        if base_slug.endswith(suffix):
+            base_slug = base_slug[:-len(suffix)]
+            break
+            
+    for cand in [base_slug, f"{base_slug}-manga", f"{base_slug}-arabic"]:
+        if cand not in candidates:
+            candidates.append(cand)
+    return candidates
+
+
+async def fetch_source_details_with_fallback(source_key: str, canonical_slug: str, initial_url: str) -> Optional[dict]:
+    """
+    Resiliently fetch target source details with sequential candidate URL testing.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(initial_url)
+    path_parts = [p for p in parsed.path.split("/") if p]
+    current_slug = path_parts[-1] if path_parts else canonical_slug
+    
+    candidates = get_slug_candidates(canonical_slug, current_slug)
+    logger.info(f"[Fallback Resolver] Slug candidates for {source_key}: {candidates}")
+    
+    last_exception = None
+    for cand_slug in candidates:
+        if source_key == "meshmanga_com":
+            url = f"https://meshmanga.com/series/{cand_slug}/"
+        else:
+            url = f"https://olympustaff.com/series/{cand_slug}/"
+            
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        try:
+            logger.info(f"[Fallback Resolver] Attempting fetch for {source_key} with URL: {url}")
+            if source_key == "meshmanga_com":
+                result = await asyncio.wait_for(scrape_meshmanga_details(url), timeout=5.0)
+            else:
+                result = await asyncio.wait_for(scrape_madara_details(url), timeout=5.0)
+                
+            latency = loop.time() - start_time
+            if result:
+                result["latency"] = latency
+                result["source_key"] = source_key
+                result["resolved_url"] = url
+                logger.info(f"[Fallback Resolver] Success for {source_key} at {url} in {latency:.2f}s")
+                return result
+        except asyncio.TimeoutError:
+            logger.warning(f"[Fallback Resolver] Timeout fetching candidate {url} for {source_key}")
+            last_exception = asyncio.TimeoutError("Timeout (5s limit)")
+            break  # Break on timeout to prevent excessive delay for the user
+        except Exception as e:
+            logger.warning(f"[Fallback Resolver] Failed candidate {url} for {source_key}: {str(e)}")
+            last_exception = e
+            continue
+            
+    if last_exception:
+        logger.error(f"[Fallback Resolver] All candidates failed for {source_key}. Last error: {str(last_exception)}")
+    return None
+
+
+async def heal_manga_details_background(canonical_slug: str, manga_url: str, sources: dict, existing_details: Optional[dict]):
+    """
+    Asynchronously scrape sources, merge chapters non-destructively, and update MongoDB details.
+    """
+    if not await check_db_online():
+        logger.warning("[Background Heal] MongoDB is offline. Skipping background healing.")
+        return
+        
+    logger.info(f"[Background Heal] Starting background healing for: {canonical_slug}")
+    
+    tasks = [fetch_source_details_with_fallback(key, canonical_slug, url) for key, url in sources.items()]
+    scraped_results = await asyncio.gather(*tasks)
+    successful_results = [r for r in scraped_results if r]
+    
+    if not successful_results:
+        logger.error(f"[Background Heal] All sources failed during background healing for {canonical_slug}")
+        return
+        
+    successful_results.sort(key=lambda x: x.get("latency", 999.0))
+    primary = successful_results[0]
+    secondary = successful_results[1] if len(successful_results) > 1 else None
+    
+    description = primary.get("description") or ""
+    genres = set(primary.get("genres") or [])
+    
+    if secondary:
+        if not description and secondary.get("description"):
+            description = secondary["description"]
+        if secondary.get("genres"):
+            genres.update(secondary["genres"])
+            
+    if existing_details:
+        if not description and existing_details.get("description"):
+            description = existing_details["description"]
+        if existing_details.get("genres"):
+            genres.update(existing_details["genres"])
+            
+    merged_chapters = {}
+    
+    def normalize_text(text) -> str:
+        if not isinstance(text, str):
+            return ""
+        text = text.lower().strip()
+        text = re.sub(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', '', text)
+        text = re.sub(r'[أإآ]', 'ا', text)
+        text = text.replace('ة', 'ه').replace('ى', 'ي')
+        return "".join(re.findall(r'\w+', text))
+
+    # 1. Cache chapters (lowest priority)
+    if existing_details and "chapters" in existing_details:
+        for ch in existing_details["chapters"]:
+            try:
+                ch_title = str(ch.get("title") or "")
+                ch_url = str(ch.get("url") or "")
+                ch_num = ch.get("extracted_number")
+                if ch_num is None:
+                    ch_num = ch.get("chapter_number")
+                if ch_num is None:
+                    ch_num = extract_chapter_number(ch_title, ch_url)
+                try:
+                    ch_num = float(ch_num)
+                except (TypeError, ValueError):
+                    ch_num = -1.0
+                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                merged_chapters[key] = {
+                    "title": ch_title,
+                    "url": ch_url,
+                    "chapter_number": ch_num,
+                    "extracted_number": ch_num
+                }
+            except Exception:
+                continue
+
+    # 2. Secondary source chapters (medium priority)
+    if secondary:
+        for ch in secondary.get("chapters", []):
+            try:
+                ch_title = str(ch.get("title") or "")
+                ch_url = str(ch.get("url") or "")
+                ch_num = extract_chapter_number(ch_title, ch_url)
+                try:
+                    ch_num = float(ch_num)
+                except (TypeError, ValueError):
+                    ch_num = -1.0
+                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                merged_chapters[key] = {
+                    "title": ch_title,
+                    "url": ch_url,
+                    "chapter_number": ch_num,
+                    "extracted_number": ch_num
+                }
+            except Exception:
+                continue
+
+    # 3. Primary source chapters (highest priority)
+    for ch in primary.get("chapters", []):
+        try:
+            ch_title = str(ch.get("title") or "")
+            ch_url = str(ch.get("url") or "")
+            ch_num = extract_chapter_number(ch_title, ch_url)
+            try:
+                ch_num = float(ch_num)
+            except (TypeError, ValueError):
+                ch_num = -1.0
+            key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+            merged_chapters[key] = {
+                "title": ch_title,
+                "url": ch_url,
+                "chapter_number": ch_num,
+                "extracted_number": ch_num
+            }
+        except Exception:
+            continue
+
+    sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
+    final_chapters = infer_chapter_numbers(sorted_chapters)
+    
+    # Ensure that final_chapters contain both keys after inference too
+    for ch in final_chapters:
+        if "extracted_number" not in ch:
+            ch["extracted_number"] = ch.get("chapter_number", -1.0)
+        elif "chapter_number" not in ch:
+            ch["chapter_number"] = ch.get("extracted_number", -1.0)
+            
+    now_str = datetime.utcnow().isoformat()
+    cached_sources = [r["source_key"] for r in successful_results]
+    
+    details_payload = {
+        "description": description,
+        "genres": list(genres),
+        "total_chapters": len(final_chapters),
+        "chapters": final_chapters,
+        "last_cached_at": now_str,
+        "cached_sources": cached_sources
+    }
+    
+    update_payload = {
+        "details": details_payload,
+        "updated_at": now_str
+    }
+    
+    for r in successful_results:
+        src_key = r["source_key"]
+        resolved_url = r["resolved_url"]
+        update_payload[f"sources.{src_key}.url"] = resolved_url
+        update_payload[f"sources.{src_key}.updated_at"] = now_str
+        
+    try:
+        await manga_collection.update_one(
+            {"slug": canonical_slug},
+            {"$set": update_payload}
+        )
+        logger.info(f"[Background Heal] Cache updated for {canonical_slug} (Sources: {cached_sources})")
+    except Exception as exc:
+        logger.error(f"[Background Heal] Failed to save cache: {str(exc)}")
+
+
 @app.get(f"{API_PREFIX}/manga/details")
 async def get_manga_details(
-    manga_url: str = Query(..., description="The direct URL of the specific manga page to scrape details from")
+    manga_url: str = Query(..., description="The direct URL of the specific manga page to scrape details from"),
+    background_tasks: BackgroundTasks = None
 ):
     """
     Get inner details of a specific manga, including description, genres, and all chapters (ordered).
+    Implements Stale-While-Revalidate caching.
     """
     if not manga_url.startswith(("http://", "https://")):
         from urllib.parse import urljoin
@@ -202,56 +434,87 @@ async def get_manga_details(
         if await check_db_online():
             manga_doc = await manga_collection.find_one({"slug": canonical_slug})
             
+        cached_details = manga_doc.get("details") if manga_doc else None
+        
+        # Determine Cache Freshness (TTL = 2 hours)
+        DETAILS_CACHE_TTL = 7200
+        is_cache_fresh = False
+        if cached_details and "last_cached_at" in cached_details:
+            try:
+                cached_at = datetime.fromisoformat(cached_details["last_cached_at"])
+                age = (datetime.utcnow() - cached_at).total_seconds()
+                if age < DETAILS_CACHE_TTL:
+                    is_cache_fresh = True
+            except Exception:
+                pass
+                
+        # Retrieve candidate URLs
         sources = {}
         if manga_doc and "sources" in manga_doc:
             for src_key, src_data in manga_doc["sources"].items():
                 sources[src_key] = src_data["url"]
         
-        # Ensure we always attempt to scrape both if database doesn't have them or is missing one
         if "meshmanga_com" not in sources:
             sources["meshmanga_com"] = f"https://meshmanga.com/series/{canonical_slug}/"
         if "olympustaff_com" not in sources:
             sources["olympustaff_com"] = f"https://olympustaff.com/series/{canonical_slug}/"
             
-        async def fetch_source_details(source_key: str, url: str) -> Optional[dict]:
-            loop = asyncio.get_running_loop()
-            start_time = loop.time()
-            try:
-                if "meshmanga.com" in url.lower():
-                    result = await asyncio.wait_for(scrape_meshmanga_details(url), timeout=5.0)
-                else:
-                    result = await asyncio.wait_for(scrape_madara_details(url), timeout=5.0)
-                
-                latency = loop.time() - start_time
-                if result:
-                    result["latency"] = latency
-                    result["source_key"] = source_key
-                return result
-            except asyncio.TimeoutError:
-                logger.warning(f"[API] Timeout (5s limit) fetching details for {source_key} at {url}")
-                return None
-            except Exception as e:
-                logger.error(f"[API] Error fetching details for {source_key} at {url}: {str(e)}")
-                return None
-
-        # Scraping concurrently in parallel
-        import asyncio
-        tasks = [fetch_source_details(key, url) for key, url in sources.items()]
-        scraped_results = await asyncio.gather(*tasks)
+        # Case A: Cache is Fresh -> Serve immediately
+        if is_cache_fresh and cached_details:
+            logger.info(f"[API] Serving fresh cached details for {canonical_slug}")
+            return {
+                "status": "success",
+                "manga_url": manga_url,
+                "description": cached_details.get("description") or "",
+                "genres": cached_details.get("genres") or [],
+                "total_chapters": cached_details.get("total_chapters") or 0,
+                "chapters": cached_details.get("chapters") or []
+            }
+            
+        # Case B: Cache Stale -> Serve immediately, heal in background
+        if cached_details:
+            logger.info(f"[API] Serving stale cached details for {canonical_slug}. Healing in background.")
+            if background_tasks:
+                background_tasks.add_task(
+                    heal_manga_details_background,
+                    canonical_slug,
+                    manga_url,
+                    sources,
+                    cached_details
+                )
+            return {
+                "status": "success",
+                "manga_url": manga_url,
+                "description": cached_details.get("description") or "",
+                "genres": cached_details.get("genres") or [],
+                "total_chapters": cached_details.get("total_chapters") or 0,
+                "chapters": cached_details.get("chapters") or []
+            }
+            
+        # Case C: No Cache -> Synchronous Live Fetch
+        logger.info(f"[API] No cache found for {canonical_slug}. Fetching synchronously.")
         
+        tasks = [fetch_source_details_with_fallback(key, canonical_slug, url) for key, url in sources.items()]
+        scraped_results = await asyncio.gather(*tasks)
         successful_results = [r for r in scraped_results if r]
+        
         if not successful_results:
             raise Exception("All target sources failed or timed out during details fetching")
             
-        # Sort successful results by latency ascending (fastest first)
         successful_results.sort(key=lambda x: x.get("latency", 999.0))
-        
         primary = successful_results[0]
         secondary = successful_results[1] if len(successful_results) > 1 else None
         
-        # Populate details from primary
         description = primary.get("description") or ""
         genres = set(primary.get("genres") or [])
+        
+        if secondary:
+            if not description and secondary.get("description"):
+                description = secondary["description"]
+            if secondary.get("genres"):
+                genres.update(secondary["genres"])
+                
+        merged_chapters = {}
         
         def normalize_text(text) -> str:
             if not isinstance(text, str):
@@ -262,79 +525,93 @@ async def get_manga_details(
             text = text.replace('ة', 'ه').replace('ى', 'ي')
             return "".join(re.findall(r'\w+', text))
 
-        primary_chapters = primary.get("chapters", [])
-        if not isinstance(primary_chapters, list):
-            primary_chapters = []
-            
-        merged_chapters = {}
-        
-        # Process Primary Source with Defensive Guards
-        for ch in primary_chapters:
-            try:
-                if not isinstance(ch, dict):
-                    continue
-                ch_title = str(ch.get("title") or "")
-                ch_url = str(ch.get("url") or "")
-                ch_num = extract_chapter_number(ch_title, ch_url)
-                
-                try:
-                    ch_num = float(ch_num)
-                except (TypeError, ValueError):
-                    ch_num = -1.0
-                    
-                ch_payload = {
-                    "title": ch_title,
-                    "url": ch_url,
-                    "extracted_number": ch_num
-                }
-                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
-                merged_chapters[key] = ch_payload
-            except Exception as loop_exc:
-                logger.warning(f"[API] Skipping corrupted primary chapter item: {str(loop_exc)}")
-                continue
-            
         if secondary:
-            if not description and secondary.get("description"):
-                description = secondary["description"]
-            if secondary.get("genres"):
-                genres.update(secondary["genres"])
-                
-            secondary_chapters = secondary.get("chapters", [])
-            if not isinstance(secondary_chapters, list):
-                secondary_chapters = []
-                
-            # Process Secondary Source with Defensive Guards
-            for ch in secondary_chapters:
+            for ch in secondary.get("chapters", []):
                 try:
                     if not isinstance(ch, dict):
                         continue
                     ch_title = str(ch.get("title") or "")
                     ch_url = str(ch.get("url") or "")
                     ch_num = extract_chapter_number(ch_title, ch_url)
-                    
                     try:
                         ch_num = float(ch_num)
                     except (TypeError, ValueError):
                         ch_num = -1.0
-                        
-                    ch_payload = {
+                    key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                    merged_chapters[key] = {
                         "title": ch_title,
                         "url": ch_url,
+                        "chapter_number": ch_num,
                         "extracted_number": ch_num
                     }
-                    key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
-                    if key not in merged_chapters:
-                        merged_chapters[key] = ch_payload
                 except Exception as loop_exc:
                     logger.warning(f"[API] Skipping corrupted secondary chapter item: {str(loop_exc)}")
                     continue
                     
-        # Sort descending (Newest to Oldest) by extracted number (stable sort)
+        for ch in primary.get("chapters", []):
+            try:
+                if not isinstance(ch, dict):
+                    continue
+                ch_title = str(ch.get("title") or "")
+                ch_url = str(ch.get("url") or "")
+                ch_num = extract_chapter_number(ch_title, ch_url)
+                try:
+                    ch_num = float(ch_num)
+                except (TypeError, ValueError):
+                    ch_num = -1.0
+                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                merged_chapters[key] = {
+                    "title": ch_title,
+                    "url": ch_url,
+                    "chapter_number": ch_num,
+                    "extracted_number": ch_num
+                }
+            except Exception as loop_exc:
+                logger.warning(f"[API] Skipping corrupted primary chapter item: {str(loop_exc)}")
+                continue
+                
         sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
-        
-        # Pass final merged results through infer_chapter_numbers to ensure strict monotonic ascending order
         final_chapters = infer_chapter_numbers(sorted_chapters)
         
+        # Ensure that final_chapters contain both keys after inference too
+        for ch in final_chapters:
+            if "extracted_number" not in ch:
+                ch["extracted_number"] = ch.get("chapter_number", -1.0)
+            elif "chapter_number" not in ch:
+                ch["chapter_number"] = ch.get("extracted_number", -1.0)
+                
+        now_str = datetime.utcnow().isoformat()
+        cached_sources = [r["source_key"] for r in successful_results]
+        
+        details_payload = {
+            "description": description,
+            "genres": list(genres),
+            "total_chapters": len(final_chapters),
+            "chapters": final_chapters,
+            "last_cached_at": now_str,
+            "cached_sources": cached_sources
+        }
+        
+        update_payload = {
+            "details": details_payload,
+            "updated_at": now_str
+        }
+        
+        for r in successful_results:
+            src_key = r["source_key"]
+            resolved_url = r["resolved_url"]
+            update_payload[f"sources.{src_key}.url"] = resolved_url
+            update_payload[f"sources.{src_key}.updated_at"] = now_str
+            
+        if await check_db_online():
+            try:
+                await manga_collection.update_one(
+                    {"slug": canonical_slug},
+                    {"$set": update_payload}
+                )
+            except Exception as db_exc:
+                logger.error(f"[API] Failed to save cache synchronously: {str(db_exc)}")
+                
         return {
             "status": "success",
             "manga_url": manga_url,
@@ -343,6 +620,7 @@ async def get_manga_details(
             "total_chapters": len(final_chapters),
             "chapters": final_chapters
         }
+        
     except httpx.TimeoutException as exc:
         raise HTTPException(
             status_code=504,
