@@ -253,15 +253,31 @@ async def get_manga_details(
         description = primary.get("description") or ""
         genres = set(primary.get("genres") or [])
         
+        def normalize_text(text: str) -> str:
+            if not text:
+                return ""
+            text = text.lower().strip()
+            text = re.sub(r'\b(?:الفصل|فصل|شابتر|chapter|ch|ep|episode)\b', '', text)
+            text = re.sub(r'[أإآ]', 'ا', text)
+            text = text.replace('ة', 'ه').replace('ى', 'ي')
+            return "".join(re.findall(r'\w+', text))
+
         primary_chapters = primary.get("chapters", [])
-        primary_inferred = infer_chapter_numbers(primary_chapters)
+        merged_chapters = {}
         
-        merged_chapters = {ch["chapter_number"]: {
-            "title": ch.get("title", ""),
-            "url": ch.get("url", ""),
-            "chapter_number": ch["chapter_number"]
-        } for ch in primary_inferred}
-        
+        # Process Primary Source
+        for ch in primary_chapters:
+            ch_title = ch.get("title", "")
+            ch_url = ch.get("url", "")
+            ch_num = extract_chapter_number(ch_title, ch_url)
+            ch_payload = {
+                "title": ch_title,
+                "url": ch_url,
+                "extracted_number": ch_num
+            }
+            key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+            merged_chapters[key] = ch_payload
+            
         if secondary:
             if not description and secondary.get("description"):
                 description = secondary["description"]
@@ -269,24 +285,21 @@ async def get_manga_details(
                 genres.update(secondary["genres"])
                 
             secondary_chapters = secondary.get("chapters", [])
-            secondary_inferred = infer_chapter_numbers(secondary_chapters)
-            
-            max_primary_ch = max(merged_chapters.keys()) if merged_chapters else -float('inf')
-            
-            for ch in secondary_inferred:
-                ch_num = ch["chapter_number"]
+            for ch in secondary_chapters:
+                ch_title = ch.get("title", "")
+                ch_url = ch.get("url", "")
+                ch_num = extract_chapter_number(ch_title, ch_url)
                 ch_payload = {
-                    "title": ch.get("title", ""),
-                    "url": ch.get("url", ""),
-                    "chapter_number": ch_num
+                    "title": ch_title,
+                    "url": ch_url,
+                    "extracted_number": ch_num
                 }
-                if ch_num > max_primary_ch:
-                    merged_chapters[ch_num] = ch_payload
-                elif ch_num not in merged_chapters:
-                    merged_chapters[ch_num] = ch_payload
+                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                if key not in merged_chapters:
+                    merged_chapters[key] = ch_payload
                     
-        # Sort descending (Newest to Oldest)
-        sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["chapter_number"], reverse=True)
+        # Sort descending (Newest to Oldest) by extracted number (stable sort)
+        sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
         
         # Pass final merged results through infer_chapter_numbers to ensure strict monotonic ascending order
         final_chapters = infer_chapter_numbers(sorted_chapters)
