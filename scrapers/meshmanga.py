@@ -15,7 +15,7 @@ async def scrape_meshmanga_latest(site_url: str) -> list[dict]:
     Scrapes latest updates from MeshManga by fetching the series sorted by updated_at.
     """
     api_url = "https://appswat.com/v2/api/v2/series/?ordering=-updated_at&page=1"
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         response = await client.get(api_url)
         response.raise_for_status()
         data = response.json()
@@ -42,7 +42,7 @@ async def scrape_meshmanga_catalog(site_url: str, page: int) -> list[dict]:
     Scrapes the manga catalog from MeshManga API.
     """
     api_url = f"https://appswat.com/v2/api/v2/series/?page={page}"
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         response = await client.get(api_url)
         response.raise_for_status()
         data = response.json()
@@ -102,7 +102,7 @@ async def scrape_meshmanga_details(manga_url: str) -> dict:
         raise Exception(f"Invalid manga URL: {manga_url}")
     slug = path_parts[-1]
     
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         # Resolve ID by slug
         series_id = await get_series_id_by_slug(client, slug)
         logger.info(f"[MeshManga] Resolved slug '{slug}' to series ID {series_id}")
@@ -151,7 +151,7 @@ async def scrape_meshmanga_pages(chapter_url: str) -> list[str]:
     chapter_id = match.group(1)
     
     api_url = f"https://appswat.com/v2/api/v2/chapters/{chapter_id}/"
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         response = await client.get(api_url)
         response.raise_for_status()
         data = response.json()

@@ -1,7 +1,14 @@
 import httpx
 import re
+import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+
+logger = logging.getLogger("uvicorn")
+
+def print(*args, **kwargs):
+    msg = " ".join(str(arg) for arg in args)
+    logger.info(msg)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -199,7 +206,7 @@ async def scrape_madara_latest(base_url: str) -> list:
     """
     print(f"[Scraper] Preparing to fetch latest updates page from {base_url}...")
     
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         response = await client.get(base_url)
         response.raise_for_status()
         html = response.text
@@ -218,7 +225,7 @@ async def scrape_madara_catalog(base_url: str, page: int) -> list:
     page_url = construct_page_url(base_url, page)
     print(f"[Scraper] Scraping catalog page {page}: {page_url}")
     
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         response = await client.get(page_url)
         response.raise_for_status()
         html = response.text
@@ -247,7 +254,7 @@ async def scrape_madara_details(manga_url: str) -> dict:
     ajax_path = f"{clean_path}/ajax/chapters/"
     ajax_url = urlunparse((parsed_manga_url.scheme, parsed_manga_url.netloc, ajax_path, "", "", ""))
     
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         # First fetch the main page to get description and genres
         response = await client.get(manga_url)
         response.raise_for_status()
@@ -334,7 +341,7 @@ async def scrape_madara_details(manga_url: str) -> dict:
                         "action": "manga_get_chapters",
                         "manga": manga_id
                     },
-                    timeout=15.0
+                    timeout=5.0
                 )
                 if ajax_res.status_code == 200 and ajax_res.text.strip():
                     # Validate that response contains actual chapter links
@@ -475,7 +482,7 @@ async def scrape_madara_pages(chapter_url: str) -> list:
     """
     print(f"[Scraper] Preparing to fetch chapter pages from {chapter_url}...")
     
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as client:
         response = await client.get(chapter_url)
         response.raise_for_status()
         html = response.text

@@ -331,13 +331,20 @@ async def get_chapter_pages(
 
         # 2. Scrape raw page URLs
         from urllib.parse import urlparse
+        chapter_url = chapter_url.strip()
         parsed_chapter = urlparse(chapter_url)
         chapter_domain = parsed_chapter.netloc.lower()
 
-        if "meshmanga.com" in chapter_domain or "appswat.com" in chapter_domain:
-            raw_pages = await scrape_meshmanga_pages(chapter_url)
-        else:
-            raw_pages = await scrape_madara_pages(chapter_url)
+        try:
+            if "meshmanga.com" in chapter_domain or "appswat.com" in chapter_domain:
+                raw_pages = await asyncio.wait_for(scrape_meshmanga_pages(chapter_url), timeout=5.0)
+            else:
+                raw_pages = await asyncio.wait_for(scrape_madara_pages(chapter_url), timeout=5.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="Request to target site timed out (5s limit)"
+            )
             
         if not raw_pages:
             return {
