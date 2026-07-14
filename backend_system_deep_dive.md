@@ -48,7 +48,7 @@ graph TD
 The FastAPI application ([main.py](file:///D:/neomangatest/neomanga-api-server/main.py)) exposes four primary API endpoints under the `/api/v1` prefix:
 *   **`/api/v1/manga/latest`**: Scrapes and returns the most recently updated manga titles from a specified site.
 *   **`/api/v1/manga/catalog`**: Serves paginated index catalogs.
-*   **`/api/v1/manga/details`**: Returns metadata (description, genres) and the complete list of chapters, ordered chronologically from oldest (e.g., Chapter 1) to newest.
+*   **`/api/v1/manga/details`**: Returns metadata (description, genres) and the complete list of chapters, merged from multiple sources, deduplicated, and strictly ordered from newest (Index 0 = Newest) to oldest.
 *   **`/api/v1/chapters/pages`**: Provides the reading page image URLs for a specific chapter.
 
 When an HTTPS request arrives, FastAPI extracts query parameters such as `site_url`, `manga_url`, or `chapter_url` and validates their URL scheme (forcing `http://` or `https://`).
@@ -82,6 +82,7 @@ If a title matches any of these keywords (case-insensitively), it is discarded b
     }
     ```
     This allows a single manga entry to consolidate metadata and URL pointers across multiple source sites.
+3.  **Slug Normalization & Fuzzy Mapping**: To bridge differences in source-specific slug names (e.g., `martial-peak` vs `martial-peak-manga`), the server utilizes a `slug_mappings` MongoDB collection to map aliases to their canonical versions. This collection is auto-seeded on startup from a local `slug_mappings.json` file in the backend root.
 3.  **Exception Shield & Timeout Limit**: The database client ([core/database.py](file:///D:/neomangatest/neomanga-api-server/core/database.py)) is configured with a 1-second timeout selection ceiling (`serverSelectionTimeoutMS=1000`). If a startup ping fails, the global boolean `IS_DB_ONLINE` is flagged as `False`. The ingestion functions block execution loops if the database is offline, preventing the endpoints from hanging.
 
 #### Step 5: Raw Cover URL Retention
