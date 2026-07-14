@@ -300,6 +300,9 @@ async def get_chapter_pages(
     """
     Get the reading image URLs from a specific chapter page, and cache them in MongoDB.
     """
+    if "meshmanga.com" in chapter_url and "/series/" in chapter_url:
+        chapter_url = chapter_url.replace("meshmanga.com", "olympustaff.com")
+
     if not chapter_url.startswith(("http://", "https://")):
         from urllib.parse import urljoin
         if "meshmanga.com" in chapter_url.lower():
