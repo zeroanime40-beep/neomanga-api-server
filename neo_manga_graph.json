@@ -1,0 +1,1350 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": {
+    "name": "NeoManga_v3_KnowledgeGraph",
+    "version": "12.0",
+    "last_updated": "2026-07-15",
+    "deployment_env": "Render.com",
+    "truth_override": "Render.com + 100% Pure Metadata Aggregator (no Cloudinary). Legacy Vercel/Cloudinary references in older commits are SUPERSEDED."
+  },
+  "nodes": [
+    {
+      "node_type": "android_class",
+      "file": "mihon/app/src/main/java/eu/kanade/tachiyomi/source/AndroidSourceManager.kt",
+      "description": "Singleton source registry. Registers masterSource (NeoMangaMasterExtension), meshSource (MeshMangaExtension), and virtualSource (NeoMangaVirtualSource) inside a ConcurrentHashMap<Long, Source>.",
+      "release": "Release 1 (Conflict-Free Multi-Source Convergence)",
+      "id": "AndroidSourceManager"
+    },
+    {
+      "node_type": "android_source",
+      "file": "mihon/app/src/main/java/eu/kanade/tachiyomi/source/online/NeoMangaMasterExtension.kt",
+      "source_name": "Olympus Staff",
+      "source_id": "1382165189279060276L",
+      "base_url": "https://neomanga-api-server.onrender.com/api/v1",
+      "site_url": "https://olympustaff.com",
+      "lang": "ar",
+      "description": "HTTP source targeting Olympus Staff via FastAPI backend. Renamed from 'Team X' → 'Olympus Staff' in Release 1 to prevent SQLite source ID collision with MeshMangaExtension.",
+      "hotfix": "Chapter URL stored as absolute URL via `url = chapterItem.url` (not setUrlWithoutDomain) to prevent domain routing conflict.",
+      "release": "Release 1, Release 9 (Render.com migration)",
+      "id": "NeoMangaMasterExtension"
+    },
+    {
+      "node_type": "android_source",
+      "file": "mihon/app/src/main/java/eu/kanade/tachiyomi/source/online/MeshMangaExtension.kt",
+      "source_name": "Team X",
+      "source_id": "4110737012647435874L",
+      "base_url": "https://neomanga-api-server.onrender.com/api/v1",
+      "site_url": "https://meshmanga.com",
+      "lang": "ar",
+      "description": "Masquerades as 'Team X' to bypass Mihon core language filters and auto-populate the unified dashboard. Routes to MeshManga via FastAPI.",
+      "masquerade_reason": "'Team X' is hardcoded in GetEnabledSources.kt, GetUnifiedGlobalCatalogUseCase.kt, DashboardScreenModel.kt, MainActivity.kt",
+      "release": "Release 1, Release 9 (Render.com migration)",
+      "id": "MeshMangaExtension"
+    },
+    {
+      "node_type": "android_source",
+      "file": "mihon/app/src/main/java/eu/kanade/tachiyomi/source/online/NeoMangaVirtualSource.kt",
+      "source_id": "9999L",
+      "description": "Local virtual/offline source. ID 9999L. Registered alongside live sources.",
+      "release": "Release 1",
+      "id": "NeoMangaVirtualSource"
+    },
+    {
+      "node_type": "android_screen",
+      "description": "Hardcoded to look for source name 'Team X'. Drives MeshMangaExtension masquerade requirement.",
+      "invariant": "source_name == 'Team X'",
+      "id": "GetEnabledSources"
+    },
+    {
+      "node_type": "android_screen",
+      "description": "Hardcoded to look for source name 'Team X'. Drives MeshMangaExtension masquerade requirement.",
+      "invariant": "source_name == 'Team X'",
+      "id": "GetUnifiedGlobalCatalogUseCase"
+    },
+    {
+      "node_type": "android_screen",
+      "description": "Hardcoded to look for source name 'Team X'. Drives MeshMangaExtension masquerade requirement.",
+      "invariant": "source_name == 'Team X'",
+      "id": "DashboardScreenModel"
+    },
+    {
+      "node_type": "android_screen",
+      "description": "Hardcoded to look for source name 'Team X'. Drives MeshMangaExtension masquerade requirement.",
+      "invariant": "source_name == 'Team X'",
+      "id": "MainActivity"
+    },
+    {
+      "node_type": "android_class",
+      "file": "mihon/core/common/src/main/kotlin/eu/kanade/tachiyomi/network/NetworkHelper.kt",
+      "description": "Singleton OkHttpClient factory. Cookie jar, DoH via Cloudflare, disk cache 100 MiB, 30s connect/read timeout, 2min call timeout.",
+      "id": "NetworkHelper"
+    },
+    {
+      "node_type": "kotlin_interceptor",
+      "description": "Catches unhandled exceptions in network calls.",
+      "id": "UncaughtExceptionInterceptor"
+    },
+    {
+      "node_type": "kotlin_interceptor",
+      "description": "Injects custom User-Agent from network preferences.",
+      "id": "UserAgentInterceptor"
+    },
+    {
+      "node_type": "kotlin_interceptor",
+      "description": "Exponential backoff on 429; rotates UA on 503.",
+      "id": "SmartRetryInterceptor"
+    },
+    {
+      "node_type": "kotlin_interceptor",
+      "description": "Launches hidden Android WebView to solve CF JS challenge, extracts cf_clearance cookie, retries request.",
+      "id": "CloudflareInterceptor"
+    },
+    {
+      "node_type": "kotlin_interceptor",
+      "description": "Modifies Cache-Control max-age dynamically.",
+      "id": "DynamicCacheInterceptor"
+    },
+    {
+      "node_type": "android_class",
+      "description": "Override in NeoMangaMasterExtension. Extracts host domain from page.imageUrl and sets Referer = scheme://host/ to bypass hotlinking (403 Forbidden). Replaces old Cloudinary proxy flow.",
+      "parent_file": "NeoMangaMasterExtension.kt",
+      "invariant": "Referer = scheme + '://' + httpUrl.host + '/'",
+      "release": "Phase 2 (Cloudinary Decoupling)",
+      "id": "imageRequest_override"
+    },
+    {
+      "node_type": "fastapi_module",
+      "file": "neomanga-api-server/main.py",
+      "deployment": "Render.com — https://neomanga-api-server.onrender.com",
+      "legacy_deployment": "Vercel Serverless (superseded in Release 9)",
+      "description": "FastAPI application. Defines all endpoints, lifespan event handler (DB init, shared httpx.AsyncClient pool), and APScheduler 60-min sync job.",
+      "id": "main_py"
+    },
+    {
+      "node_type": "fastapi_endpoint",
+      "description": "Scrapes and returns most recently updated manga titles.",
+      "dispatcher": "domain-based → madara_base or meshmanga scraper",
+      "id": "GET /api/v1/manga/latest"
+    },
+    {
+      "node_type": "fastapi_endpoint",
+      "description": "Live Pagination with Async Background Ingestion. Returns live-scraped items immediately; upserts to MongoDB via BackgroundTasks. Cache-read-first lookup REMOVED (Release 2 walkthrough fix).",
+      "invariant": "No read-first cache; relies on live REST pagination",
+      "id": "GET /api/v1/manga/catalog"
+    },
+    {
+      "node_type": "fastapi_endpoint",
+      "description": "SWR caching endpoint. Concurrent asyncio.gather scrape of all sources (5.0s timeout per source). Runs Merge-Then-Infer pipeline. Implements slug candidate fallback testing.",
+      "swr_ttl_seconds": 7200,
+      "priority": "MeshManga-over-Olympus (by processing order in sorted_keys)",
+      "pipeline": "fetch → deduplicate raw → infer_chapter_numbers once → sort descending → return",
+      "release": "Release 1 through Release 6.1",
+      "id": "GET /api/v1/manga/details"
+    },
+    {
+      "node_type": "fastapi_endpoint",
+      "description": "Returns chapter page image URLs. Domain-based dispatch. asyncio.wait_for 5.0s ceiling. Domain rewrite fail-safe. gc.collect() REMOVED (Release 8 P5).",
+      "domain_dispatch": {
+        "meshmanga.com OR appswat.com": "scrape_meshmanga_pages",
+        "else": "scrape_madara_pages"
+      },
+      "hotfix": "Domain rewrite: meshmanga.com chapter URLs → olympustaff.com before dispatch.",
+      "release": "Release 1, Release 8",
+      "id": "GET /api/v1/chapters/pages"
+    },
+    {
+      "node_type": "fastapi_endpoint",
+      "description": "Manual HTTP hook / Vercel Cron trigger for fetch_and_sync_latest_updates().",
+      "id": "POST /api/cron-scrape"
+    },
+    {
+      "node_type": "python_core",
+      "file": "neomanga-api-server/core/database.py",
+      "description": "AsyncIOMotorClient pool. MongoDB collection pointers. extract_chapter_number, infer_chapter_numbers, upsert_manga_entry, check_db_online, create_unique_indexes, generate_slug, slug_mappings loader.",
+      "pool_config": "maxPoolSize=20, minPoolSize=0, serverSelectionTimeoutMS=3000",
+      "release": "Release 7 (D1–D5), Release 8 (P6)",
+      "id": "core/database.py"
+    },
+    {
+      "node_type": "python_core",
+      "file": "neomanga-api-server/core/config.py",
+      "description": "Loads .env via load_dotenv() before Settings class init. Reads MONGO_URI, etc.",
+      "id": "core/config.py"
+    },
+    {
+      "node_type": "python_core",
+      "file": "neomanga-api-server/core/scheduler.py",
+      "description": "AsyncIOScheduler from apscheduler. fetch_and_sync_latest_updates() every 60 minutes.",
+      "id": "core/scheduler.py"
+    },
+    {
+      "node_type": "python_core",
+      "file": "neomanga-api-server/core/storage.py",
+      "status": "DEPRECATED",
+      "description": "Cloudinary upload stub. upload_image_to_cloudinary() is a no-op warning logger. Retained for backward compat only. NOT executed by any live code path.",
+      "deprecated_in": "Phase 2 (Cloudinary Decoupling)",
+      "id": "core/storage.py"
+    },
+    {
+      "node_type": "python_scraper",
+      "file": "neomanga-api-server/scrapers/madara_base.py",
+      "targets": [
+        "olympustaff.com"
+      ],
+      "parser": "lxml (migrated from html.parser in Release 8 P2)",
+      "threading": "asyncio.to_thread() for BeautifulSoup DOM work (Release 8 P1)",
+      "client_injection": "Accepts optional shared httpx.AsyncClient (Release 8 P3)",
+      "regexes_precompiled": "REGEX_THUMBNAIL_SIZE, REGEX_MANGA_ID_SCRIPT, REGEX_MANGA_ID_HTML (Release 8 P6)",
+      "description": "CSS-selector HTML scraper for Madara/TS-Theme sites. Multi-selector fallback chains for titles (12), chapter containers (10), page images (7+2 fallbacks). NSFW_BLOCKLIST filter. Unicode print → uvicorn logger override.",
+      "nsfw_blocklist": [
+        "+18",
+        "18+",
+        "محتوى غير لائق",
+        "المحتوى غير لائق"
+      ],
+      "unicode_fix": "print() → uvicorn logger to prevent UnicodeEncodeError on ASCII stdout hosts",
+      "id": "scrapers/madara_base.py"
+    },
+    {
+      "node_type": "python_scraper",
+      "file": "neomanga-api-server/scrapers/meshmanga.py",
+      "targets": [
+        "meshmanga.com",
+        "appswat.com"
+      ],
+      "api_base": "https://appswat.com/v2/api/v2/",
+      "description": "Django REST API scraper. Bypasses Next.js client-side skeleton rendering. Sequential pagination (slug→ID lookup → details → chapter pages). Client injection enabled (Release 8 P3).",
+      "note": "REST database IDs in URL path bypassed — extract_chapter_number skips URL parse for meshmanga.com/appswat.com",
+      "id": "scrapers/meshmanga.py"
+    },
+    {
+      "node_type": "mongodb_collection",
+      "db": "neomanga_db",
+      "unique_index": "slug (programmatic, Release 7 D2)",
+      "schema": {
+        "_id": "ObjectId",
+        "title": "str",
+        "slug": "str (canonical, unique)",
+        "thumbnail": "raw target URL (no Cloudinary)",
+        "created_at": "ISO-Timestamp",
+        "updated_at": "ISO-Timestamp",
+        "sources": {
+          "<domain_key>": {
+            "url": "str",
+            "latest_chapter": "str",
+            "updated_at": "ISO-Timestamp"
+          }
+        }
+      },
+      "description": "Multi-source manga metadata registry. Single document per canonical slug. Sources sub-document keyed by domain (e.g. 'meshmanga_com', 'olympustaff_com').",
+      "id": "mongo:manga_catalog"
+    },
+    {
+      "node_type": "mongodb_collection",
+      "db": "neomanga_db",
+      "unique_index": "chapter_url (programmatic, Release 7 D2)",
+      "description": "Cached chapter page image URL arrays. Keyed by absolute chapter URL.",
+      "id": "mongo:chapter_pages"
+    },
+    {
+      "node_type": "mongodb_collection",
+      "db": "neomanga_db",
+      "description": "Alias→canonical slug mapping table. Auto-seeded from slug_mappings.json on startup. Used by fetch_source_details_with_fallback to resolve mismatched slugs across sources.",
+      "id": "mongo:slug_mappings"
+    },
+    {
+      "node_type": "infrastructure",
+      "description": "app.state.http_client — process-level httpx.AsyncClient. Limits: max_connections=50, max_keepalive_connections=20. Initialized in lifespan, closed on shutdown. Injected into all scraper paths. (Release 8 P3)",
+      "release": "Release 8",
+      "id": "shared_httpx_client"
+    },
+    {
+      "node_type": "algorithm",
+      "file": "neomanga-api-server/core/database.py",
+      "description": "Parses chapter float from title+URL. Returns -1.0 on failure (changed from 0.0 in Release 2 to distinguish parse-failure from Chapter 0). For meshmanga.com/appswat.com URLs: skips URL-path parse entirely (prevents REST DB ID pollution). Falls back to Arabic title extraction.",
+      "invariant": "Returns -1.0 on failure (never 0.0 for parse failures post Release 2)",
+      "hotfix": "MeshManga REST ID bypass — prevents /chapters/1751659/ from poisoning chapter float",
+      "release": "Release 2, Hotfix 4",
+      "id": "algo:extract_chapter_number"
+    },
+    {
+      "node_type": "algorithm",
+      "file": "neomanga-api-server/core/database.py",
+      "description": "Single-pass two-phase chapter number reconstruction. Input: chapter list in descending order. Reversed internally to ascending. Phase 1 — Backward Pass (Prologue Extrapolation):   delta = V / (first_valid_idx + 1) if V - first_valid_idx*1.0 <= 0 else 1.0   chapter_i = V - (first_valid_idx - i) * delta Phase 2 — Forward Pass (Monotonic Enforcement):   if -1.0: assign last_valid_val + 1.0   if valid but not strictly > last_valid_val: max(parsed, last_valid + 0.01) Output: reversed back to descending. CALLED EXACTLY ONCE on unified merged list (Merge-Then-Infer, Release 4).",
+      "math_backward_delta": "delta = V / (first_valid_idx + 1)",
+      "math_forward_fallback": "chapter_i = last_valid_val + 1.0",
+      "math_monotonic_correction": "chapter_i = max(parsed_val, last_valid_val + 0.01)",
+      "invariant": "Called exactly once post-merge (NOT per source). Stable sort input.",
+      "release": "Release 2 (initial), Release 4 (single-pass fix)",
+      "id": "algo:infer_chapter_numbers"
+    },
+    {
+      "node_type": "algorithm",
+      "file": "neomanga-api-server/main.py",
+      "description": "Global helper. Lowercases, removes Arabic diacritics, strips common prefixes (الفصل, فصل, شابتر, chapter, ch, ep, episode), normalizes Arabic chars (أإآ→ا, ة→ه, ى→ي), strips non-alphanumeric. Guards: isinstance(text, str) returns '' for non-strings (Release 5 crash fix).",
+      "invariant": "isinstance(text, str) guard — returns '' for non-string input",
+      "release": "Release 4 (initial), Release 5 (type guard)",
+      "id": "algo:normalize_text"
+    },
+    {
+      "node_type": "algorithm",
+      "description": "Consolidated deduplication-before-inference pipeline (Release 4). Fixes double-sorting/source-stacking bug from Release 3. Steps: 1. extract_chapter_number per chapter (both sources raw). 2. Key = 'num_<N>' if N!=-1.0 else 'text_<normalize_text(title)>'. 3. Primary fills merged_chapters; Secondary only fills if key absent. 4. Stable sort descending by extracted_number. 5. infer_chapter_numbers called ONCE on unified sequence.",
+      "invariant": "infer_chapter_numbers invoked exactly once post-merge",
+      "dedup_key_numeric": "num_<float>  e.g. num_95.0",
+      "dedup_key_text": "text_<normalized_title>  e.g. text_مقدمة",
+      "release": "Release 4",
+      "id": "algo:merge_then_infer_pipeline"
+    },
+    {
+      "node_type": "algorithm",
+      "description": "Stale-While-Revalidate caching on /api/v1/manga/details. TTL = 7200s (2 hours). Case A (Age < TTL): serve fresh cache → cleanse_cached_chapters → return. Case B (Age >= TTL): serve stale cache → trigger heal_manga_details_background. Case C (no cache): synchronous live fetch + merge + cache.",
+      "ttl_seconds": 7200,
+      "math": "Age = T_current - T_cached; Response = D if Age < 7200 else D+heal() else sync_fetch()",
+      "release": "Release 6",
+      "id": "algo:swr_cache"
+    },
+    {
+      "node_type": "algorithm",
+      "description": "In-memory deduplication of cached chapter arrays before client delivery. Resolves N defensively: chapter_number first, extracted_number second, extract_chapter_number(title,url) third. Applied in Case A and Case B. Eliminates legacy duplicate entries in client viewport instantly.",
+      "fallback_chain": "chapter_number → extracted_number → extract_chapter_number(title,url)",
+      "release": "Release 6.1",
+      "id": "algo:cleanse_cached_chapters"
+    },
+    {
+      "node_type": "algorithm",
+      "description": "Dynamic Primary/Secondary source assignment based on asyncio event loop latency. P = argmin(latency) from successful results. Gap-filling: if c_j.chapter_number > max_primary_ch → append (extension). if c_j.chapter_number not in M → patch (gap-fill). Final consolidated list → infer_chapter_numbers → return descending.",
+      "math_primary": "P = argmin_r_in_S(latency_r)",
+      "math_extension": "c_j.chapter_number > max_primary_ch → append",
+      "math_gap_fill": "c_j.chapter_number not in M → patch",
+      "release": "Release 3 (initial latency-aware), superseded by Release 4 (Merge-Then-Infer)",
+      "id": "algo:latency_aware_merger"
+    },
+    {
+      "node_type": "algorithm",
+      "file": "neomanga-api-server/core/database.py",
+      "description": "Atomic MongoDB upsert. Single update_one({'slug': slug}, {'$set': {...}, '$setOnInsert': {...}}, upsert=True). Replaces non-atomic find-then-branch pattern. (Release 7 D1)",
+      "invariant": "Atomic — no check-then-act race condition",
+      "release": "Release 7",
+      "id": "algo:upsert_manga_entry"
+    },
+    {
+      "node_type": "algorithm",
+      "file": "neomanga-api-server/core/database.py",
+      "description": "Non-sticky DB connectivity flag. Re-tests if IS_DB_ONLINE is False AND 30s cooldown has elapsed since last check. Prevents transient startup blips from permanently disabling all persistence.",
+      "cooldown_seconds": 30,
+      "invariant": "IS_DB_ONLINE=False is not permanent; re-checked after 30s cooldown",
+      "release": "Release 7 D4",
+      "id": "algo:check_db_online"
+    },
+    {
+      "node_type": "algorithm",
+      "file": "neomanga-api-server/main.py",
+      "description": "Tests slug candidate URLs sequentially when HTTP 404/exceptions occur. Candidates: base slug, slug + '-manga', slug + '-arabic'. Returns working URL for background healing to persist.",
+      "candidates": [
+        "<slug>",
+        "<slug>-manga",
+        "<slug>-arabic"
+      ],
+      "release": "Release 6",
+      "id": "algo:fetch_source_details_with_fallback"
+    },
+    {
+      "node_type": "algorithm",
+      "file": "neomanga-api-server/main.py",
+      "description": "Distributed atomic revalidation lease mechanism using find_one_and_update. Prevents the Thundering Herd / Dogpile effect during SWR cache healing transitions by converting O(N) concurrent scrapes into a flat O(1) single execution loop.",
+      "ttl_seconds": 300,
+      "acquired_by": "render_api_worker",
+      "lock_schema": {
+        "healing_lock": {
+          "expires_at": "ISO-8601",
+          "acquired_by": "str"
+        }
+      },
+      "invariant": "Atomic server-side check-and-set via a single MongoDB roundtrip. Gated within DB online checks.",
+      "release": "Release 9.1 (D3 Hardening / Thundering Herd Fix)",
+      "id": "algo:revalidation_lease_d3"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Chapter images returned 403 Forbidden — Referer check by CDN.",
+      "resolution": "Dynamic imageRequest override extracts host and sets matching Referer header.",
+      "release": "Phase 2 Decoupling",
+      "status": "RESOLVED",
+      "id": "BUG:cloudinary_403"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "UnicodeEncodeError crash on Vercel/serverless hosts with ASCII stdout when scrapers printed Arabic manga titles.",
+      "resolution": "All print() in madara_base.py routed through uvicorn logger.",
+      "release": "Phase 2",
+      "status": "RESOLVED",
+      "id": "BUG:ascii_stdout_crash"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "MeshManga chapter URLs contain REST DB IDs (e.g. /chapters/1751659/). URL-based regex parsed these as chapter numbers (millions), corrupting chronological sorting and multi-source deduplication.",
+      "resolution": "extract_chapter_number skips URL-path regex entirely for meshmanga.com/appswat.com. Falls back immediately to Arabic title extraction.",
+      "release": "Hotfix 4",
+      "status": "RESOLVED",
+      "id": "BUG:meshmanga_rest_id_pollution"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "setUrlWithoutDomain() stripped domain from chapter URLs stored in SQLite. Relative paths resolved against wrong default siteUrl (meshmanga.com → olympustaff).",
+      "resolution": "Use `url = chapterItem.url` (absolute URL) in getMangaUpdate.",
+      "release": "Release 1 Hotfix 2",
+      "status": "RESOLVED",
+      "id": "BUG:domain_misrouting"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Catalog endpoint read all 289 cached items ignoring page param, causing infinite scroll freeze in Mihon.",
+      "resolution": "Removed read-first cache lookup. Live REST pagination + BackgroundTasks ingestion.",
+      "release": "Phase 2 Walkthrough",
+      "status": "RESOLVED",
+      "id": "BUG:catalog_pagination_freeze"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "IS_DB_ONLINE set to False on transient startup blip permanently disabled all persistence for the container's lifetime.",
+      "resolution": "Non-sticky check_db_online() with 30s retry cooldown.",
+      "release": "Release 7 D4",
+      "status": "RESOLVED",
+      "id": "BUG:is_db_online_sticky"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Non-atomic find-then-insert upsert_manga_entry allowed concurrent writers to create duplicate slug documents, fragmenting chapter history.",
+      "resolution": "Atomic update_one($set/$setOnInsert, upsert=True) + unique index on slug.",
+      "release": "Release 7 D1/D2",
+      "status": "RESOLVED",
+      "id": "BUG:duplicate_slug_race"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Per-source infer_chapter_numbers (Release 3) generated independent float sequences for each source (1.0→97.0 for A, 1.0→95.01 for B). No deduplication → two separate stacked blocks in final chapter list.",
+      "resolution": "Merge-Then-Infer pipeline: deduplicate raw first, infer once on unified list.",
+      "release": "Release 4",
+      "status": "RESOLVED",
+      "id": "BUG:source_stacking_double_sort"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Corrupted chapter payloads (None items, non-dict entries, None field values) caused TypeError in normalize_text and sorted() → HTTP 500 crash.",
+      "resolution": "isinstance(text, str) guard in normalize_text. Per-item try/except in merge loops. isinstance(ch, dict) check. Explicit float() cast with -1.0 fallback.",
+      "release": "Release 5",
+      "status": "RESOLVED",
+      "id": "BUG:http500_none_chapter"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Vercel serverless bypassed ASGI lifespan events, leaving IS_DB_ONLINE=False permanently. Database never initialized for container.",
+      "resolution": "Lazy init via check_db_online() on first request; caches result for lifespan.",
+      "release": "Phase 2 Walkthrough",
+      "status": "RESOLVED",
+      "id": "BUG:vercel_lifespan_bypass"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Cloudinary credentials read as None — load_dotenv() called after Settings init.",
+      "resolution": "Explicit load_dotenv() before Settings class instantiation in core/config.py.",
+      "release": "Commit 6 (git log)",
+      "status": "RESOLVED (and moot — Cloudinary removed entirely in Phase 2)",
+      "id": "BUG:cloudinary_env_none"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "BeautifulSoup html.parser runs synchronously on asyncio event loop, blocking all concurrent requests for parse duration.",
+      "resolution": "asyncio.to_thread() for all BS4 DOM work + lxml parser backend.",
+      "release": "Release 8 P1/P2",
+      "status": "RESOLVED",
+      "id": "BUG:event_loop_blocking_parse"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "gc.collect() on request path blocks event loop, adds pure latency.",
+      "resolution": "Removed from /api/v1/chapters/pages path.",
+      "release": "Release 8 P5",
+      "status": "RESOLVED",
+      "id": "BUG:gc_collect_latency"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Legacy cache entries only contained chapter_number (not extracted_number). extracted_number check failed → assigned -1.0 → bypass deduplication → duplicate chapters visible in client.",
+      "resolution": "cleanse_cached_chapters with defensive fallback chain: chapter_number → extracted_number → extract_chapter_number(title,url).",
+      "release": "Release 6.1",
+      "status": "RESOLVED",
+      "id": "BUG:cache_duplicate_chapters"
+    },
+    {
+      "node_type": "bug_fix",
+      "description": "Multiple concurrent stale cache requests concurrently enqueued background healing scraping tasks, causing scraper pipeline dogpiling.",
+      "resolution": "Atomic server-side check-and-set via find_one_and_update lease acquisition filter.",
+      "release": "Release 9.1",
+      "status": "RESOLVED",
+      "id": "BUG:thundering_herd_concurrency"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Removed all Cloudinary upload logic. core/storage.py deprecated as stub. Raw target URLs stored directly in MongoDB. Zero-cost image hosting.",
+      "files_changed": [
+        "core/database.py",
+        "core/storage.py",
+        "main.py"
+      ],
+      "id": "Phase_1_Cloudinary_Decoupling"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "MeshManga REST API scraper. Team X masquerade. BackgroundTasks ingestion. Live pagination fix. Vercel circuit-breaker check_db_online().",
+      "files_changed": [
+        "scrapers/meshmanga.py",
+        "main.py",
+        "core/database.py",
+        "MeshMangaExtension.kt",
+        "AndroidSourceManager.kt"
+      ],
+      "id": "Phase_2_MeshManga_Integration"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Reactivated NeoMangaMasterExtension as 'Olympus Staff'. MeshManga-over-Olympus merge priority. asyncio.gather parallel fetch. 5.0s timeout ceiling. Domain-based page dispatch.",
+      "files_changed": [
+        "main.py",
+        "core/database.py",
+        "AndroidSourceManager.kt",
+        "NeoMangaMasterExtension.kt",
+        "MeshMangaExtension.kt"
+      ],
+      "id": "Phase_3_Multi_Source_Convergence"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "infer_chapter_numbers() — backward prologue extrapolation + forward monotonic pass. extract_chapter_number returns -1.0 (not 0.0) on failure.",
+      "files_changed": [
+        "core/database.py",
+        "main.py"
+      ],
+      "id": "Phase_4_Dynamic_Inference"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Dynamic Primary/Secondary source by asyncio event loop latency. Smart gap-filling and extension appending.",
+      "files_changed": [
+        "main.py"
+      ],
+      "id": "Phase_5_Latency_Aware_Merger"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Fixes source-stacking double-sort bug. normalize_text dedup keys. Single-pass infer_chapter_numbers on unified merged list.",
+      "files_changed": [
+        "main.py"
+      ],
+      "id": "Phase_6_Merge_Then_Infer"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "isinstance guards, per-item try/except, explicit float() coercion, str() casts. Zero HTTP 500 crashes from corrupted payloads.",
+      "files_changed": [
+        "main.py"
+      ],
+      "id": "Phase_7_HTTP500_Crash_Fix"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Stale-While-Revalidate 2-hour TTL. heal_manga_details_background(). get_slug_candidates(). fetch_source_details_with_fallback(). cleanse_cached_chapters() duplicate fix.",
+      "files_changed": [
+        "main.py"
+      ],
+      "id": "Phase_8_SWR_Caching"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Atomic upsert (D1), unique indexes (D2), non-sticky DB check (D4), explicit pool config (D5). lxml + asyncio.to_thread parsing (P1/P2). Shared httpx.AsyncClient pool (P3). Precompiled regex (P6). gc.collect removed (P5).",
+      "files_changed": [
+        "core/database.py",
+        "main.py",
+        "scrapers/madara_base.py",
+        "scrapers/meshmanga.py",
+        "requirements.txt"
+      ],
+      "id": "Phase_9_DB_Integrity"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Migrated from Vercel to Render.com. No backend code changes (cloud-agnostic). baseUrl updated in MeshMangaExtension.kt, NeoMangaMasterExtension.kt, NetworkPreferences.kt. New endpoint: https://neomanga-api-server.onrender.com/api/v1",
+      "files_changed": [
+        "MeshMangaExtension.kt",
+        "NeoMangaMasterExtension.kt",
+        "NetworkPreferences.kt"
+      ],
+      "id": "Phase_10_Render_Migration"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "CSS selector drift warnings & critical scrape failures (S1, S2) in madara_base.py. Django REST API schema contract validation (S4) in meshmanga.py. Safe exception shielding & recovery with stale cached details fallback in main.py.",
+      "files_changed": [
+        "scrapers/madara_base.py",
+        "scrapers/meshmanga.py",
+        "main.py"
+      ],
+      "id": "Phase_11_Resilience_Telemetry"
+    },
+    {
+      "node_type": "infrastructure",
+      "description": "CURRENT production deployment host. Persistent server (not serverless). No 5s cold-start timeout. APScheduler runs continuously.",
+      "status": "CURRENT",
+      "id": "Render.com"
+    },
+    {
+      "node_type": "infrastructure",
+      "description": "LEGACY deployment host (superseded by Render.com in Release 9). Serverless — BackgroundTasks execution not guaranteed post-response. ASGI lifespan bypass known issue.",
+      "status": "SUPERSEDED",
+      "id": "Vercel"
+    },
+    {
+      "node_type": "infrastructure",
+      "description": "Database. neomanga_db. Collections: manga_catalog, chapter_pages, slug_mappings.",
+      "id": "MongoDB_Atlas"
+    },
+    {
+      "node_type": "infrastructure",
+      "description": "https://appswat.com/v2/api/v2/ — Django REST API underlying MeshManga Next.js app. Reverse-engineered to bypass client-side skeleton loading.",
+      "id": "MeshManga_REST_API"
+    },
+    {
+      "node_type": "infrastructure",
+      "description": "https://olympustaff.com — Madara/TS-Theme WordPress manga site. CSS-selector HTML scraping via madara_base.py.",
+      "id": "OlympusStaff_Site"
+    },
+    {
+      "node_type": "dependency",
+      "description": "Web framework",
+      "id": "dep:fastapi"
+    },
+    {
+      "node_type": "dependency",
+      "description": "ASGI server",
+      "id": "dep:uvicorn"
+    },
+    {
+      "node_type": "dependency",
+      "description": "Async HTTP client",
+      "id": "dep:httpx"
+    },
+    {
+      "node_type": "dependency",
+      "description": "HTML parsing",
+      "id": "dep:beautifulsoup4"
+    },
+    {
+      "node_type": "dependency",
+      "description": "Async MongoDB driver (AsyncIOMotorClient)",
+      "id": "dep:motor"
+    },
+    {
+      "node_type": "dependency",
+      "description": "Environment variable loading",
+      "id": "dep:python-dotenv"
+    },
+    {
+      "node_type": "dependency",
+      "description": "60-minute background sync scheduler",
+      "id": "dep:apscheduler"
+    },
+    {
+      "node_type": "dependency",
+      "description": "DEPRECATED — retained in requirements.txt but storage.py is a stub",
+      "id": "dep:cloudinary"
+    },
+    {
+      "node_type": "dependency",
+      "description": "High-speed C-extension HTML parser backend (added Release 8)",
+      "id": "dep:lxml"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Solved chapter sorting/prologue inversions via Chronological Interpolation, resolved sequential scraper timeouts via high-speed parallel asyncio.gather page fetch, and implemented Premium Chapter fallback registry.",
+      "files_changed": [
+        "scrapers/madara_base.py",
+        "scrapers/meshmanga.py",
+        "main.py"
+      ],
+      "id": "Phase_12_Complete_Ingestion"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Aligned Arabic Home Dashboard and API contracts. Implemented 15s page 1 loading timeouts and 10s pages 2-3 lazy loading in GetUnifiedGlobalCatalogUseCase.kt. Hardened DashboardScreenModel.kt with a 10s timeout, non-blocking firstOrNull() flow extraction, and 5x3s cold-start retry budget. Corrected Recommendations AsyncImage bindings in DashboardScreen.kt.",
+      "files_changed": [
+        "GetUnifiedGlobalCatalogUseCase.kt",
+        "DashboardScreenModel.kt",
+        "DashboardScreen.kt"
+      ],
+      "id": "Phase_13_Dashboard_Resilience"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "registers",
+      "confidence": "EXTRACTED",
+      "source": "AndroidSourceManager",
+      "target": "NeoMangaMasterExtension"
+    },
+    {
+      "relation": "registers",
+      "confidence": "EXTRACTED",
+      "source": "AndroidSourceManager",
+      "target": "MeshMangaExtension"
+    },
+    {
+      "relation": "registers",
+      "confidence": "EXTRACTED",
+      "source": "AndroidSourceManager",
+      "target": "NeoMangaVirtualSource"
+    },
+    {
+      "relation": "implements",
+      "confidence": "EXTRACTED",
+      "source": "NeoMangaMasterExtension",
+      "target": "imageRequest_override"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "method": "getPopularManga",
+      "source": "NeoMangaMasterExtension",
+      "target": "GET /api/v1/manga/catalog"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "method": "getLatestUpdates",
+      "source": "NeoMangaMasterExtension",
+      "target": "GET /api/v1/manga/latest"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "method": "getMangaUpdate",
+      "source": "NeoMangaMasterExtension",
+      "target": "GET /api/v1/manga/details"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "method": "getPageList",
+      "source": "NeoMangaMasterExtension",
+      "target": "GET /api/v1/chapters/pages"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "method": "getPopularManga",
+      "source": "MeshMangaExtension",
+      "target": "GET /api/v1/manga/catalog"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "method": "getMangaUpdate",
+      "source": "MeshMangaExtension",
+      "target": "GET /api/v1/manga/details"
+    },
+    {
+      "relation": "requires_name",
+      "confidence": "EXTRACTED",
+      "note": "Will fail/hide source if name differs from 'Team X'",
+      "source": "GetEnabledSources",
+      "target": "MeshMangaExtension"
+    },
+    {
+      "relation": "requires_name",
+      "confidence": "EXTRACTED",
+      "note": "Will fail/hide source if name differs from 'Team X'",
+      "source": "GetUnifiedGlobalCatalogUseCase",
+      "target": "MeshMangaExtension"
+    },
+    {
+      "relation": "requires_name",
+      "confidence": "EXTRACTED",
+      "note": "Will fail/hide source if name differs from 'Team X'",
+      "source": "DashboardScreenModel",
+      "target": "MeshMangaExtension"
+    },
+    {
+      "relation": "requires_name",
+      "confidence": "EXTRACTED",
+      "note": "Will fail/hide source if name differs from 'Team X'",
+      "source": "MainActivity",
+      "target": "MeshMangaExtension"
+    },
+    {
+      "relation": "applies_interceptor",
+      "confidence": "EXTRACTED",
+      "source": "NetworkHelper",
+      "target": "UncaughtExceptionInterceptor"
+    },
+    {
+      "relation": "applies_interceptor",
+      "confidence": "EXTRACTED",
+      "source": "NetworkHelper",
+      "target": "UserAgentInterceptor"
+    },
+    {
+      "relation": "applies_interceptor",
+      "confidence": "EXTRACTED",
+      "source": "NetworkHelper",
+      "target": "SmartRetryInterceptor"
+    },
+    {
+      "relation": "applies_interceptor",
+      "confidence": "EXTRACTED",
+      "source": "NetworkHelper",
+      "target": "CloudflareInterceptor"
+    },
+    {
+      "relation": "applies_interceptor",
+      "confidence": "EXTRACTED",
+      "source": "NetworkHelper",
+      "target": "DynamicCacheInterceptor"
+    },
+    {
+      "relation": "chains_to",
+      "confidence": "EXTRACTED",
+      "source": "UncaughtExceptionInterceptor",
+      "target": "UserAgentInterceptor"
+    },
+    {
+      "relation": "chains_to",
+      "confidence": "EXTRACTED",
+      "source": "UserAgentInterceptor",
+      "target": "SmartRetryInterceptor"
+    },
+    {
+      "relation": "chains_to",
+      "confidence": "EXTRACTED",
+      "source": "SmartRetryInterceptor",
+      "target": "CloudflareInterceptor"
+    },
+    {
+      "relation": "chains_to",
+      "confidence": "EXTRACTED",
+      "source": "CloudflareInterceptor",
+      "target": "DynamicCacheInterceptor"
+    },
+    {
+      "relation": "exposes",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "GET /api/v1/manga/latest"
+    },
+    {
+      "relation": "exposes",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "GET /api/v1/manga/catalog"
+    },
+    {
+      "relation": "exposes",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "GET /api/v1/manga/details"
+    },
+    {
+      "relation": "exposes",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "GET /api/v1/chapters/pages"
+    },
+    {
+      "relation": "exposes",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "POST /api/cron-scrape"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:fastapi"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:uvicorn"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:httpx"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:beautifulsoup4"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:motor"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:python-dotenv"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:apscheduler"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:cloudinary"
+    },
+    {
+      "relation": "depends_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "dep:lxml"
+    },
+    {
+      "relation": "deployed_on",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "Render.com"
+    },
+    {
+      "relation": "connects_to",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "MongoDB_Atlas"
+    },
+    {
+      "relation": "owns",
+      "confidence": "EXTRACTED",
+      "source": "main_py",
+      "target": "shared_httpx_client"
+    },
+    {
+      "relation": "writes_background",
+      "confidence": "EXTRACTED",
+      "note": "BackgroundTasks async write post-response",
+      "source": "GET /api/v1/manga/catalog",
+      "target": "mongo:manga_catalog"
+    },
+    {
+      "relation": "dispatches_to",
+      "confidence": "EXTRACTED",
+      "condition": "olympustaff.com domain",
+      "source": "GET /api/v1/manga/details",
+      "target": "scrapers/madara_base.py"
+    },
+    {
+      "relation": "dispatches_to",
+      "confidence": "EXTRACTED",
+      "condition": "meshmanga.com domain",
+      "source": "GET /api/v1/manga/details",
+      "target": "scrapers/meshmanga.py"
+    },
+    {
+      "relation": "reads_writes",
+      "confidence": "EXTRACTED",
+      "source": "GET /api/v1/manga/details",
+      "target": "mongo:manga_catalog"
+    },
+    {
+      "relation": "enforces_lock",
+      "confidence": "EXTRACTED",
+      "source": "GET /api/v1/manga/details",
+      "target": "algo:revalidation_lease_d3"
+    },
+    {
+      "relation": "dispatches_to",
+      "confidence": "EXTRACTED",
+      "condition": "non-meshmanga domain",
+      "source": "GET /api/v1/chapters/pages",
+      "target": "scrapers/madara_base.py"
+    },
+    {
+      "relation": "dispatches_to",
+      "confidence": "EXTRACTED",
+      "condition": "meshmanga.com OR appswat.com",
+      "source": "GET /api/v1/chapters/pages",
+      "target": "scrapers/meshmanga.py"
+    },
+    {
+      "relation": "reads_writes",
+      "confidence": "EXTRACTED",
+      "source": "GET /api/v1/chapters/pages",
+      "target": "mongo:chapter_pages"
+    },
+    {
+      "relation": "scrapes",
+      "confidence": "EXTRACTED",
+      "source": "scrapers/madara_base.py",
+      "target": "OlympusStaff_Site"
+    },
+    {
+      "relation": "injected_client",
+      "confidence": "EXTRACTED",
+      "source": "scrapers/madara_base.py",
+      "target": "shared_httpx_client"
+    },
+    {
+      "relation": "scrapes",
+      "confidence": "EXTRACTED",
+      "source": "scrapers/meshmanga.py",
+      "target": "MeshManga_REST_API"
+    },
+    {
+      "relation": "injected_client",
+      "confidence": "EXTRACTED",
+      "source": "scrapers/meshmanga.py",
+      "target": "shared_httpx_client"
+    },
+    {
+      "relation": "defined_in",
+      "confidence": "EXTRACTED",
+      "source": "algo:extract_chapter_number",
+      "target": "core/database.py"
+    },
+    {
+      "relation": "defined_in",
+      "confidence": "EXTRACTED",
+      "source": "algo:infer_chapter_numbers",
+      "target": "core/database.py"
+    },
+    {
+      "relation": "implemented_in",
+      "confidence": "EXTRACTED",
+      "source": "algo:merge_then_infer_pipeline",
+      "target": "main_py"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "call_count": "once per chapter per source",
+      "source": "algo:merge_then_infer_pipeline",
+      "target": "algo:extract_chapter_number"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "condition": "when extracted_number == -1.0",
+      "source": "algo:merge_then_infer_pipeline",
+      "target": "algo:normalize_text"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "invariant": "called exactly once on unified merged list",
+      "source": "algo:merge_then_infer_pipeline",
+      "target": "algo:infer_chapter_numbers"
+    },
+    {
+      "relation": "implemented_in",
+      "confidence": "EXTRACTED",
+      "source": "algo:swr_cache",
+      "target": "main_py"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "cases": [
+        "Case A",
+        "Case B"
+      ],
+      "source": "algo:swr_cache",
+      "target": "algo:cleanse_cached_chapters"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "case": "Case B (stale), Case C (no cache)",
+      "source": "algo:swr_cache",
+      "target": "algo:fetch_source_details_with_fallback"
+    },
+    {
+      "relation": "gated_by_lease",
+      "confidence": "INFERRED",
+      "source": "algo:swr_cache",
+      "target": "algo:revalidation_lease_d3"
+    },
+    {
+      "relation": "implemented_in",
+      "confidence": "EXTRACTED",
+      "source": "algo:cleanse_cached_chapters",
+      "target": "main_py"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source": "algo:latency_aware_merger",
+      "target": "algo:infer_chapter_numbers"
+    },
+    {
+      "relation": "atomically_updates",
+      "confidence": "EXTRACTED",
+      "field": "healing_lock",
+      "source": "algo:revalidation_lease_d3",
+      "target": "mongo:manga_catalog"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:cloudinary_403",
+      "target": "imageRequest_override"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:ascii_stdout_crash",
+      "target": "scrapers/madara_base.py"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:meshmanga_rest_id_pollution",
+      "target": "algo:extract_chapter_number"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:domain_misrouting",
+      "target": "NeoMangaMasterExtension"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:catalog_pagination_freeze",
+      "target": "GET /api/v1/manga/catalog"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:is_db_online_sticky",
+      "target": "algo:check_db_online"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:duplicate_slug_race",
+      "target": "algo:upsert_manga_entry"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:source_stacking_double_sort",
+      "target": "algo:merge_then_infer_pipeline"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:http500_none_chapter",
+      "target": "algo:normalize_text"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:vercel_lifespan_bypass",
+      "target": "algo:check_db_online"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:event_loop_blocking_parse",
+      "target": "scrapers/madara_base.py"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:gc_collect_latency",
+      "target": "GET /api/v1/chapters/pages"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:cache_duplicate_chapters",
+      "target": "algo:cleanse_cached_chapters"
+    },
+    {
+      "relation": "resolved_by",
+      "confidence": "EXTRACTED",
+      "source": "BUG:thundering_herd_concurrency",
+      "target": "algo:revalidation_lease_d3"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_1_Cloudinary_Decoupling",
+      "target": "core/storage.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_1_Cloudinary_Decoupling",
+      "target": "core/database.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_2_MeshManga_Integration",
+      "target": "scrapers/meshmanga.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_2_MeshManga_Integration",
+      "target": "MeshMangaExtension"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_3_Multi_Source_Convergence",
+      "target": "AndroidSourceManager"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_3_Multi_Source_Convergence",
+      "target": "main_py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_4_Dynamic_Inference",
+      "target": "algo:infer_chapter_numbers"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_4_Dynamic_Inference",
+      "target": "algo:extract_chapter_number"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_6_Merge_Then_Infer",
+      "target": "algo:merge_then_infer_pipeline"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_7_HTTP500_Crash_Fix",
+      "target": "algo:normalize_text"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_8_SWR_Caching",
+      "target": "algo:swr_cache"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_8_SWR_Caching",
+      "target": "algo:cleanse_cached_chapters"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_9_DB_Integrity",
+      "target": "algo:upsert_manga_entry"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_9_DB_Integrity",
+      "target": "algo:check_db_online"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_9_DB_Integrity",
+      "target": "shared_httpx_client"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_10_Render_Migration",
+      "target": "Render.com"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_10_Render_Migration",
+      "target": "MeshMangaExtension"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_10_Render_Migration",
+      "target": "NeoMangaMasterExtension"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_11_Resilience_Telemetry",
+      "target": "scrapers/madara_base.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_11_Resilience_Telemetry",
+      "target": "scrapers/meshmanga.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_11_Resilience_Telemetry",
+      "target": "main_py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_12_Complete_Ingestion",
+      "target": "scrapers/madara_base.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_12_Complete_Ingestion",
+      "target": "scrapers/meshmanga.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_12_Complete_Ingestion",
+      "target": "main_py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_13_Dashboard_Resilience",
+      "target": "GetUnifiedGlobalCatalogUseCase"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_13_Dashboard_Resilience",
+      "target": "DashboardScreenModel"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_13_Dashboard_Resilience",
+      "target": "DashboardScreen"
+    }
+  ]
+}
