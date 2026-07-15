@@ -1,5 +1,7 @@
 import httpx
 import re
+import math
+import asyncio
 import logging
 from typing import Optional
 from urllib.parse import urlparse
@@ -211,29 +213,68 @@ async def scrape_meshmanga_details(manga_url: str, client: Optional[httpx.AsyncC
         story = detail_data.get("story", "")
         genres = [g.get("name") for g in detail_data.get("genres", []) if g.get("name")]
         
-        # Fetch all chapters
+        # Fetch Page 1 to get total count and first batch
+        page1_url = f"https://appswat.com/v2/api/v2/series/{series_id}/chapters/"
+        if client_is_shared:
+            ch_res = await active_client.get(page1_url, headers=HEADERS, timeout=5.0)
+        else:
+            ch_res = await active_client.get(page1_url)
+            
+        ch_res.raise_for_status()
+        ch_data = ch_res.json()
+        
+        validate_meshmanga_payload(ch_data, "chapters")
+        
+        # Parse page 1 results
         chapters = []
-        page_url = f"https://appswat.com/v2/api/v2/series/{series_id}/chapters/"
-        while page_url:
-            if client_is_shared:
-                ch_res = await active_client.get(page_url, headers=HEADERS, timeout=5.0)
-            else:
-                ch_res = await active_client.get(page_url)
-                
-            ch_res.raise_for_status()
-            ch_data = ch_res.json()
+        for ch in ch_data.get("results", []):
+            ch_id = ch.get("id")
+            ch_num = ch.get("chapter", "")
+            if ch_id:
+                chapters.append({
+                    "title": ch.get("title") or f"Chapter {ch_num}",
+                    "url": f"https://meshmanga.com/chapters/{ch_id}/",
+                    "is_premium": bool(ch.get("price", 0) or ch.get("is_vip"))
+                })
+        
+        # Calculate total pages from API metadata and fetch remaining in parallel
+        count = ch_data.get("count", 0)
+        page_size = len(ch_data.get("results", []))
+        if page_size > 0 and count > page_size:
+            total_pages = math.ceil(count / page_size)
             
-            validate_meshmanga_payload(ch_data, "chapters")
-            for ch in ch_data.get("results", []):
-                ch_id = ch.get("id")
-                ch_num = ch.get("chapter", "")
-                if ch_id:
-                    chapters.append({
-                        "title": ch.get("title") or f"Chapter {ch_num}",
-                        "url": f"https://meshmanga.com/chapters/{ch_id}/"
-                    })
-            page_url = ch_data.get("next")
+            # Build URLs for pages 2..N
+            remaining_urls = [f"{page1_url}?page={p}" for p in range(2, total_pages + 1)]
             
+            # Parallel fetch all remaining pages via shared client pool
+            async def fetch_chapter_page(url):
+                if client_is_shared:
+                    res = await active_client.get(url, headers=HEADERS, timeout=5.0)
+                else:
+                    res = await active_client.get(url)
+                res.raise_for_status()
+                return res.json()
+            
+            tasks = [fetch_chapter_page(url) for url in remaining_urls]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.warning(f"[MeshManga] Parallel chapter page fetch failed: {result}")
+                    continue
+                validate_meshmanga_payload(result, "chapters")
+                for ch in result.get("results", []):
+                    ch_id = ch.get("id")
+                    ch_num = ch.get("chapter", "")
+                    if ch_id:
+                        chapters.append({
+                            "title": ch.get("title") or f"Chapter {ch_num}",
+                            "url": f"https://meshmanga.com/chapters/{ch_id}/",
+                            "is_premium": bool(ch.get("price", 0) or ch.get("is_vip"))
+                        })
+            
+            logger.info(f"[MeshManga] Parallel fetch completed: {len(chapters)} chapters from {total_pages} pages")
+        
         return {
             "description": story,
             "genres": genres,

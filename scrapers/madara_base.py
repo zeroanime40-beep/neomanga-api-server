@@ -334,10 +334,23 @@ def parse_madara_chapters_html(html: str, manga_url: str, seen_chapter_urls: set
         title_text = " ".join(a.get_text().split())
         if not title_text:
             title_text = "Chapter"
+        
+        # Premium/paid chapter detection
+        is_premium = False
+        parent_li = a.find_parent("li") or a.find_parent("div")
+        if parent_li:
+            parent_classes = " ".join(parent_li.get("class", []))
+            if any(kw in parent_classes.lower() for kw in ["premium", "vip", "locked", "paid"]):
+                is_premium = True
+            if not is_premium:
+                lock_icon = parent_li.select_one(".premium-icon, .lock-icon, .fa-lock, .coin-icon, .vip-icon, .dashicons-lock")
+                if lock_icon:
+                    is_premium = True
             
         page_chapters.append({
             "title": title_text,
-            "url": chapter_url
+            "url": chapter_url,
+            "is_premium": is_premium
         })
         seen_chapter_urls.add(chapter_url)
     return page_chapters

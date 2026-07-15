@@ -234,6 +234,78 @@ def cleanse_cached_chapters(chapters: list) -> list:
     return cleaned
 
 
+def interpolate_unnumbered_chapters(chapters: list) -> list:
+    """
+    Pre-inference interpolation pass that assigns fractional chapter numbers
+    to unnumbered chapters (-1.0) based on their chronological position.
+    
+    Input: list of chapter dicts in scraped order (newest-first from merged dict).
+    Output: same list with extracted_number/chapter_number patched, still newest-first.
+    
+    Walks oldest->newest (index N-1 -> 0), tracking last_valid_val:
+      - If extracted_number != -1.0: enforce monotonicity via max(num, last_valid_val + 0.01)
+      - If extracted_number == -1.0: assign last_valid_val + 0.01
+      - If no valid seen yet (tail prologues): extrapolate backward from first valid
+    """
+    if not chapters or len(chapters) <= 1:
+        return chapters
+
+    n = len(chapters)
+
+    # Find the first valid number scanning from oldest (end of list) to newest
+    first_valid_idx = -1
+    first_valid_val = -1.0
+    for i in range(n - 1, -1, -1):
+        val = chapters[i].get("extracted_number", -1.0)
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            val = -1.0
+        if val != -1.0:
+            first_valid_idx = i
+            first_valid_val = val
+            break
+
+    # If no valid numbers exist at all, assign sequential 1.0, 2.0, ...
+    if first_valid_idx == -1:
+        for seq_i in range(n):
+            seq_val = float(n - seq_i)  # newest-first: highest number first
+            chapters[seq_i]["extracted_number"] = seq_val
+            chapters[seq_i]["chapter_number"] = seq_val
+        return chapters
+
+    # Backward extrapolation: any -1.0 entries AFTER first_valid_idx (older than first valid)
+    # In newest-first order, older = higher index, so extrapolate indices > first_valid_idx
+    for i in range(first_valid_idx + 1, n):
+        distance = i - first_valid_idx
+        extrap_val = max(first_valid_val - (distance * 0.01), 0.001)
+        chapters[i]["extracted_number"] = round(extrap_val, 4)
+        chapters[i]["chapter_number"] = round(extrap_val, 4)
+
+    # Forward walk from oldest valid toward newest (decreasing index)
+    last_valid_val = first_valid_val
+    # Start from one index before first_valid_idx (toward newer, i.e. lower index)
+    for i in range(first_valid_idx - 1, -1, -1):
+        val = chapters[i].get("extracted_number", -1.0)
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            val = -1.0
+
+        if val != -1.0:
+            # Enforce monotonicity: newer chapters must have higher numbers
+            last_valid_val = max(val, last_valid_val + 0.01)
+            chapters[i]["extracted_number"] = round(last_valid_val, 4)
+            chapters[i]["chapter_number"] = round(last_valid_val, 4)
+        else:
+            # Interpolate: assign fractional increment
+            last_valid_val += 0.01
+            chapters[i]["extracted_number"] = round(last_valid_val, 4)
+            chapters[i]["chapter_number"] = round(last_valid_val, 4)
+
+    return chapters
+
+
 def get_slug_candidates(canonical_slug: str, current_slug: str = None) -> list[str]:
     """
     Generate standard candidates for slug variations.
@@ -430,7 +502,10 @@ async def heal_manga_details_background(
             except Exception:
                 continue
 
-        sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
+        # Phase 12: Interpolate unnumbered chapters before sorting to fix prologue inversion
+        chronological_chapters = list(merged_chapters.values())
+        interpolated = interpolate_unnumbered_chapters(chronological_chapters)
+        sorted_chapters = sorted(interpolated, key=lambda x: x["extracted_number"], reverse=True)
         final_chapters = infer_chapter_numbers(sorted_chapters)
         
         # Enforce strict schema uniformity after running the inference engine
@@ -691,7 +766,10 @@ async def get_manga_details(
                 logger.warning(f"[API] Skipping corrupted primary chapter item: {str(loop_exc)}")
                 continue
                 
-        sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
+        # Phase 12: Interpolate unnumbered chapters before sorting to fix prologue inversion
+        chronological_chapters = list(merged_chapters.values())
+        interpolated = interpolate_unnumbered_chapters(chronological_chapters)
+        sorted_chapters = sorted(interpolated, key=lambda x: x["extracted_number"], reverse=True)
         final_chapters = infer_chapter_numbers(sorted_chapters)
         
         # Enforce strict schema uniformity after running the inference engine
@@ -830,6 +908,19 @@ async def get_chapter_pages(
                 "total_pages": len(cached_pages),
                 "pages": cached_pages
             }
+
+        # 1.5 Premium chapter guard — check if chapter is marked as paid/locked
+        if await check_db_online():
+            premium_doc = await manga_collection.find_one(
+                {"details.chapters": {"$elemMatch": {"url": chapter_url, "is_premium": True}}}
+            )
+            if premium_doc:
+                logger.info(f"[API] Premium chapter detected, returning guard response for: {chapter_url}")
+                return {
+                    "status": "premium",
+                    "pages": [],
+                    "message": "هذا الفصل مدفوع أو مغلق على الموقع المصدر."
+                }
 
         # 2. Scrape raw page URLs
         from urllib.parse import urlparse
