@@ -58,6 +58,26 @@ async def create_unique_indexes():
     except Exception as exc:
         logger.warning(f"[Database] Failed to verify/create unique index on 'chapter_pages.chapter_url': {str(exc)}")
 
+async def purge_and_rebuild_database():
+    """
+    Drops manga_catalog, chapter_pages, and slug_mappings collections.
+    Re-creates unique indexes and seeds default configurations.
+    """
+    logger.info("[Database] Commencing database purge...")
+    try:
+        await manga_collection.drop()
+        await chapters_collection.drop()
+        await slug_mappings_collection.drop()
+        logger.info("[Database] Successfully dropped old collections.")
+    except Exception as exc:
+        logger.error(f"[Database] Error dropping collections: {str(exc)}")
+    
+    # Recreate unique indexes
+    await create_unique_indexes()
+    # Re-seed mapping data
+    await seed_slug_mappings_if_empty()
+    logger.info("[Database] Database purge and index assertion complete.")
+
 async def test_db_connection():
     """
     Test MongoDB database connection by issuing a ping command and verifying indexes.

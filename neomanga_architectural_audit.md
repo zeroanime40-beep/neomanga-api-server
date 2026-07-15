@@ -166,6 +166,7 @@ Sequenced to front-load correctness/data-integrity fixes (cheap, zero behavioral
 2. D2 — Unique index on `slug`.
 3. D4 — Un-stick `check_db_online()` with a retry cooldown.
 4. D5 — Explicit pool size / longer `serverSelectionTimeoutMS`.
+5. DB Purge & Single-Source Override — Integrated `purge_and_rebuild_database` in `core/database.py` to programmatically drop legacy collections, recreate unique indexes, and re-seed maps on startup. Bypassed MeshManga parsing across catalog, details, and pages endpoints to route solely through Olympus Staff.
 
 **Phase 2 — Performance (do second, needs before/after latency measurement)**
 5. P2 — Switch to `lxml` parser backend (smallest possible diff, immediate win).

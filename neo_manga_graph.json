@@ -3,7 +3,7 @@
   "multigraph": false,
   "graph": {
     "name": "NeoManga_v3_KnowledgeGraph",
-    "version": "12.0",
+    "version": "13.0",
     "last_updated": "2026-07-15",
     "deployment_env": "Render.com",
     "truth_override": "Render.com + 100% Pure Metadata Aggregator (no Cloudinary). Legacy Vercel/Cloudinary references in older commits are SUPERSEDED."
@@ -683,6 +683,15 @@
         "DashboardScreen.kt"
       ],
       "id": "Phase_13_Dashboard_Resilience"
+    },
+    {
+      "node_type": "phase_milestone",
+      "description": "Established Olympus Staff as the sole source. Added a programmatic DB purge startup hook, implemented dynamic client-side masquerading for MeshManga, and cut off all MeshManga scraping pathways.",
+      "files_changed": [
+        "core/database.py",
+        "main.py"
+      ],
+      "id": "Phase_14_OlympusStaff_Pivot"
     }
   ],
   "edges": [
@@ -1345,6 +1354,18 @@
       "confidence": "EXTRACTED",
       "source": "Phase_13_Dashboard_Resilience",
       "target": "DashboardScreen"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_14_OlympusStaff_Pivot",
+      "target": "core/database.py"
+    },
+    {
+      "relation": "modifies",
+      "confidence": "EXTRACTED",
+      "source": "Phase_14_OlympusStaff_Pivot",
+      "target": "main_py"
     }
   ]
 }

@@ -43,6 +43,9 @@ def normalize_text(text) -> str:
 async def lifespan(app: FastAPI):
     # Startup: verify database connection
     await test_db_connection()
+    if os.getenv("WIPE_DATABASE", "false").lower() == "true":
+        from core.database import purge_and_rebuild_database
+        await purge_and_rebuild_database()
     start_scheduler()
     
     # Process-level connection client configuration (P3)
@@ -143,11 +146,9 @@ async def get_manga_catalog(
     Scrape a specific page of the catalog, upsert each item into MongoDB, and return the list.
     Scraped updates are ingested asynchronously in the background.
     """
-    if not site_url.startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid URL scheme. The URL must start with http:// or https://"
-        )
+    original_site_url = site_url
+    # Force-override any site_url parameter to resolve against Olympus Staff
+    site_url = "https://olympustaff.com"
 
     final_page = 1
     if pages is not None:
@@ -158,10 +159,7 @@ async def get_manga_catalog(
     print(f"[Server] Client requested Catalog Page: {final_page} (Mapped from pages={pages} / page={page})")
 
     try:
-        if "meshmanga.com" in site_url.lower():
-            items = await scrape_meshmanga_catalog(site_url, page=final_page, client=app.state.http_client)
-        else:
-            items = await scrape_madara_catalog(site_url, page=final_page, client=app.state.http_client)
+        items = await scrape_madara_catalog(site_url, page=final_page, client=app.state.http_client)
         
         # 2. ASYNCHRONOUS BACKGROUND WRITES
         if items and background_tasks:
@@ -169,7 +167,7 @@ async def get_manga_catalog(
             
         return {
             "status": "success",
-            "site_url": site_url,
+            "site_url": original_site_url,
             "page": final_page,
             "pages_scraped": final_page,
             "count": len(items),
@@ -582,6 +580,10 @@ async def get_manga_details(
         else:
             manga_url = urljoin("https://olympustaff.com", manga_url)
 
+    # Force-override any MeshManga URL to resolve against Olympus Staff
+    if "meshmanga.com" in manga_url.lower():
+        manga_url = manga_url.replace("meshmanga.com", "olympustaff.com")
+
     if not manga_url.startswith(("http://", "https://")):
         raise HTTPException(
             status_code=400,
@@ -615,16 +617,16 @@ async def get_manga_details(
             except Exception:
                 pass
                 
-        # Retrieve candidate URLs
-        sources = {}
-        if manga_doc and "sources" in manga_doc:
-            for src_key, src_data in manga_doc["sources"].items():
-                sources[src_key] = src_data["url"]
-        
-        if "meshmanga_com" not in sources:
-            sources["meshmanga_com"] = f"https://meshmanga.com/series/{canonical_slug}/"
-        if "olympustaff_com" not in sources:
-            sources["olympustaff_com"] = f"https://olympustaff.com/series/{canonical_slug}/"
+        # Retrieve candidate URLs (Only Olympus Staff is allowed)
+        olympustaff_url = None
+        if manga_doc and "sources" in manga_doc and "olympustaff_com" in manga_doc["sources"]:
+            olympustaff_url = manga_doc["sources"]["olympustaff_com"].get("url")
+        if not olympustaff_url:
+            olympustaff_url = f"https://olympustaff.com/series/{canonical_slug}/"
+            
+        sources = {
+            "olympustaff_com": olympustaff_url
+        }
             
         # Case A: Cache is Fresh -> Serve immediately
         if is_cache_fresh and cached_details:
@@ -877,8 +879,9 @@ async def get_chapter_pages(
     """
     Get the reading image URLs from a specific chapter page, and cache them in MongoDB.
     """
-    if "meshmanga.com" in chapter_url and "/series/" in chapter_url:
-        chapter_url = chapter_url.replace("meshmanga.com", "olympustaff.com")
+    original_chapter_url = chapter_url
+    if "meshmanga.com" in chapter_url.lower():
+        chapter_url = re.sub(r"meshmanga\.com", "olympustaff.com", chapter_url, flags=re.IGNORECASE)
 
     if not chapter_url.startswith(("http://", "https://")):
         from urllib.parse import urljoin
@@ -904,7 +907,7 @@ async def get_chapter_pages(
             logger.info(f"[API] Serving cached chapter pages for: {chapter_url}")
             return {
                 "status": "success",
-                "chapter_url": chapter_url,
+                "chapter_url": original_chapter_url,
                 "total_pages": len(cached_pages),
                 "pages": cached_pages
             }
@@ -925,14 +928,9 @@ async def get_chapter_pages(
         # 2. Scrape raw page URLs
         from urllib.parse import urlparse
         chapter_url = chapter_url.strip()
-        parsed_chapter = urlparse(chapter_url)
-        chapter_domain = parsed_chapter.netloc.lower()
 
         try:
-            if "meshmanga.com" in chapter_domain or "appswat.com" in chapter_domain:
-                raw_pages = await asyncio.wait_for(scrape_meshmanga_pages(chapter_url, client=app.state.http_client), timeout=5.0)
-            else:
-                raw_pages = await asyncio.wait_for(scrape_madara_pages(chapter_url, client=app.state.http_client), timeout=5.0)
+            raw_pages = await asyncio.wait_for(scrape_madara_pages(chapter_url, client=app.state.http_client), timeout=5.0)
         except asyncio.TimeoutError:
             raise HTTPException(
                 status_code=504,
@@ -942,7 +940,7 @@ async def get_chapter_pages(
         if not raw_pages:
             return {
                 "status": "success",
-                "chapter_url": chapter_url,
+                "chapter_url": original_chapter_url,
                 "total_pages": 0,
                 "pages": []
             }
@@ -955,7 +953,7 @@ async def get_chapter_pages(
 
         return {
             "status": "success",
-            "chapter_url": chapter_url,
+            "chapter_url": original_chapter_url,
             "total_pages": len(raw_pages),
             "pages": raw_pages
         }
