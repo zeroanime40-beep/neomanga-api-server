@@ -18,6 +18,28 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
+OLYMPUS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Referer": "https://olympustaff.com/",
+    "Origin": "https://olympustaff.com",
+    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1"
+}
+
+def get_headers(url: str) -> dict:
+    if "olympustaff.com" in url.lower():
+        return OLYMPUS_HEADERS
+    return HEADERS
+
+
 NSFW_BLOCKLIST = ["+18", "18+", "محتوى غير لائق", "المحتوى غير لائق"]
 
 # Precompiled regex patterns for performance optimization (P6)
@@ -462,11 +484,11 @@ async def scrape_madara_latest(base_url: str, client: Optional[httpx.AsyncClient
     print(f"[Scraper] Preparing to fetch latest updates page from {base_url}...")
     
     if client is not None:
-        response = await client.get(base_url, headers=HEADERS, timeout=5.0)
+        response = await client.get(base_url, headers=get_headers(base_url), timeout=5.0)
         response.raise_for_status()
         html = response.text
     else:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as local_client:
+        async with httpx.AsyncClient(headers=get_headers(base_url), timeout=5.0, follow_redirects=True) as local_client:
             response = await local_client.get(base_url)
             response.raise_for_status()
             html = response.text
@@ -486,11 +508,11 @@ async def scrape_madara_catalog(base_url: str, page: int, client: Optional[httpx
     print(f"[Scraper] Scraping catalog page {page}: {page_url}")
     
     if client is not None:
-        response = await client.get(page_url, headers=HEADERS, timeout=5.0)
+        response = await client.get(page_url, headers=get_headers(page_url), timeout=5.0)
         response.raise_for_status()
         html = response.text
     else:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as local_client:
+        async with httpx.AsyncClient(headers=get_headers(page_url), timeout=5.0, follow_redirects=True) as local_client:
             response = await local_client.get(page_url)
             response.raise_for_status()
             html = response.text
@@ -523,21 +545,21 @@ async def scrape_madara_details(manga_url: str, client: Optional[httpx.AsyncClie
     client_is_shared = active_client is not None
     
     if not client_is_shared:
-        active_client = httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True)
+        active_client = httpx.AsyncClient(headers=get_headers(manga_url), timeout=5.0, follow_redirects=True)
         
     try:
         # First fetch the main page to get description and genres
         if client_is_shared:
-            response = await active_client.get(manga_url, headers=HEADERS, timeout=5.0)
+            response = await active_client.get(manga_url, headers=get_headers(manga_url), timeout=5.0)
         else:
-            response = await active_client.get(manga_url)
+            response = await active_client.get(manga_url, headers=get_headers(manga_url))
             
         response.raise_for_status()
         html = response.text
         
         # Parse synopsis metadata off the event loop
         description, genres, manga_id = await asyncio.to_thread(parse_madara_details_html, html, manga_url)
-
+ 
         ajax_chapters_html = None
         
         # Method A: admin-ajax.php POST
@@ -545,13 +567,13 @@ async def scrape_madara_details(manga_url: str, client: Optional[httpx.AsyncClie
             admin_ajax_url = f"{parsed_manga_url.scheme}://{parsed_manga_url.netloc}/wp-admin/admin-ajax.php"
             try:
                 print(f"[Scraper] Fetching complete chapters list via admin-ajax POST from {admin_ajax_url} for manga ID {manga_id}...")
+                ajax_headers = get_headers(admin_ajax_url).copy()
+                ajax_headers["Content-Type"] = "application/x-www-form-urlencoded"
+                
                 if client_is_shared:
                     ajax_res = await active_client.post(
                         admin_ajax_url,
-                        headers={
-                            "User-Agent": HEADERS["User-Agent"],
-                            "Content-Type": "application/x-www-form-urlencoded"
-                        },
+                        headers=ajax_headers,
                         data={
                             "action": "manga_get_chapters",
                             "manga": manga_id
@@ -561,10 +583,7 @@ async def scrape_madara_details(manga_url: str, client: Optional[httpx.AsyncClie
                 else:
                     ajax_res = await active_client.post(
                         admin_ajax_url,
-                        headers={
-                            "User-Agent": HEADERS["User-Agent"],
-                            "Content-Type": "application/x-www-form-urlencoded"
-                        },
+                        headers=ajax_headers,
                         data={
                             "action": "manga_get_chapters",
                             "manga": manga_id
@@ -590,22 +609,22 @@ async def scrape_madara_details(manga_url: str, client: Optional[httpx.AsyncClie
             try:
                 print(f"[Scraper] Fetching chapters via path AJAX POST from {ajax_url}...")
                 if client_is_shared:
-                    ajax_res = await active_client.post(ajax_url, headers=HEADERS, timeout=5.0)
+                    ajax_res = await active_client.post(ajax_url, headers=get_headers(ajax_url), timeout=5.0)
                 else:
-                    ajax_res = await active_client.post(ajax_url)
+                    ajax_res = await active_client.post(ajax_url, headers=get_headers(ajax_url))
                 if ajax_res.status_code == 200 and ajax_res.text.strip():
                     ajax_chapters_html = ajax_res.text
                 else:
                     print(f"[Scraper] Path AJAX POST returned status {ajax_res.status_code}. Trying GET...")
                     if client_is_shared:
-                        ajax_res = await active_client.get(ajax_url, headers=HEADERS, timeout=5.0)
+                        ajax_res = await active_client.get(ajax_url, headers=get_headers(ajax_url), timeout=5.0)
                     else:
-                        ajax_res = await active_client.get(ajax_url)
+                        ajax_res = await active_client.get(ajax_url, headers=get_headers(ajax_url))
                     if ajax_res.status_code == 200 and ajax_res.text.strip():
                         ajax_chapters_html = ajax_res.text
             except Exception as path_exc:
                 print(f"[Scraper] Path AJAX fetch failed: {str(path_exc)}")
-
+ 
         chapters = []
         seen_chapter_urls = set()
         
@@ -626,9 +645,9 @@ async def scrape_madara_details(manga_url: str, client: Optional[httpx.AsyncClie
                     try:
                         print(f"[Scraper] Fetching details page {page_num}: {page_url}")
                         if client_is_shared:
-                            res_page = await active_client.get(page_url, headers=HEADERS, timeout=5.0)
+                            res_page = await active_client.get(page_url, headers=get_headers(page_url), timeout=5.0)
                         else:
-                            res_page = await active_client.get(page_url)
+                            res_page = await active_client.get(page_url, headers=get_headers(page_url))
                             
                         if res_page.status_code != 200:
                             print(f"[Scraper] Details page {page_num} returned status {res_page.status_code}. Terminating traversal.")
@@ -665,11 +684,11 @@ async def scrape_madara_pages(chapter_url: str, client: Optional[httpx.AsyncClie
     print(f"[Scraper] Preparing to fetch chapter pages from {chapter_url}...")
     
     if client is not None:
-        response = await client.get(chapter_url, headers=HEADERS, timeout=5.0)
+        response = await client.get(chapter_url, headers=get_headers(chapter_url), timeout=5.0)
         response.raise_for_status()
         html = response.text
     else:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=5.0, follow_redirects=True) as local_client:
+        async with httpx.AsyncClient(headers=get_headers(chapter_url), timeout=5.0, follow_redirects=True) as local_client:
             response = await local_client.get(chapter_url)
             response.raise_for_status()
             html = response.text
