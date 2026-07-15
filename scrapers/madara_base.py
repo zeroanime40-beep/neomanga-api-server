@@ -4,7 +4,7 @@ import logging
 import asyncio
 from typing import Optional
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger("uvicorn")
 
@@ -125,7 +125,8 @@ def parse_madara_html(html: str, base_url: str) -> list:
             "h4 a", "h5 a", "h3", "h4", "h5", "a"
         ]
         
-        for selector in title_selectors:
+        domain = urlparse(base_url).netloc
+        for idx, selector in enumerate(title_selectors):
             elements = container.select(selector)
             for el in elements:
                 anchor = el if el.name == "a" else (el.find_parent("a") or el.find("a"))
@@ -136,7 +137,11 @@ def parse_madara_html(html: str, base_url: str) -> list:
                         title_anchor = anchor
                         break
             if title_el:
+                if idx > 0:
+                    logger.warning(f'[SELECTOR DRIFT] Domain: {domain} | Section: title | Drifted to fallback selector #{idx}: "{selector}"')
                 break
+        else:
+            logger.critical(f'[CRITICAL SCRAPE FAILURE] Domain: {domain} | Section: title | All selectors failed to match.')
         
         if not title_el:
             continue
@@ -295,12 +300,17 @@ def parse_madara_chapters_html(html: str, manga_url: str, seen_chapter_urls: set
         ".row-content-chapter",
         "#chapters-list"
     ]
+    domain = urlparse(manga_url).netloc
     chapter_container = None
-    for sel in container_selectors:
+    for idx, sel in enumerate(container_selectors):
         element = soup_obj.select_one(sel)
         if element:
             chapter_container = element
+            if idx > 0:
+                logger.warning(f'[SELECTOR DRIFT] Domain: {domain} | Section: chapters | Drifted to fallback selector #{idx}: "{sel}"')
             break
+    else:
+        logger.critical(f'[CRITICAL SCRAPE FAILURE] Domain: {domain} | Section: chapters | All selectors failed to match.')
     target_soup = chapter_container if chapter_container else soup_obj
     
     anchors = target_soup.select(".wp-manga-chapter a, .chapter-link, .list-chapter a, .chapters a")
@@ -351,14 +361,25 @@ def parse_madara_pages_html(html: str, chapter_url: str) -> list:
         ".post-content img",
     ]
     
+    domain = urlparse(chapter_url).netloc
     seen_elements = set()
     ordered_imgs = []
     
-    for selector in img_selectors:
+    matched_idx = -1
+    for idx, selector in enumerate(img_selectors):
+        selector_matched = False
         for img in soup.select(selector):
             if img not in seen_elements:
                 seen_elements.add(img)
                 ordered_imgs.append(img)
+                selector_matched = True
+        if selector_matched and matched_idx == -1:
+            matched_idx = idx
+
+    if matched_idx > 0:
+        logger.warning(f'[SELECTOR DRIFT] Domain: {domain} | Section: pages | Drifted to fallback selector #{matched_idx}: "{img_selectors[matched_idx]}"')
+    elif matched_idx == -1:
+        logger.critical(f'[CRITICAL SCRAPE FAILURE] Domain: {domain} | Section: pages | All selectors failed to match.')
                 
     # Fallback: look for images inside any container that looks like a page-break/reading-content
     if not ordered_imgs:

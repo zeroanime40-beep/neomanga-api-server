@@ -4,15 +4,17 @@ import re
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from pymongo import MongoClient
 from core.config import PROJECT_NAME, API_PREFIX
 from core.database import test_db_connection, upsert_manga_entry, IS_DB_ONLINE, check_db_online, manga_collection, get_canonical_slug, extract_chapter_number, infer_chapter_numbers
 import core.database
 from core.scheduler import start_scheduler
+
+HEALING_LEASE_TTL_SECONDS = 300
 from scrapers.madara_base import scrape_madara_latest, scrape_madara_catalog, scrape_madara_details, scrape_madara_pages
-from scrapers.meshmanga import scrape_meshmanga_latest, scrape_meshmanga_catalog, scrape_meshmanga_details, scrape_meshmanga_pages
+from scrapers.meshmanga import scrape_meshmanga_latest, scrape_meshmanga_catalog, scrape_meshmanga_details, scrape_meshmanga_pages, MeshMangaContractDriftException
 import httpx
 import logging
 
@@ -298,6 +300,10 @@ async def fetch_source_details_with_fallback(
             logger.warning(f"[Fallback Resolver] Timeout fetching candidate {url} for {source_key}")
             last_exception = asyncio.TimeoutError("Timeout (5s limit)")
             break  # Break on timeout to prevent excessive delay for the user
+        except MeshMangaContractDriftException as e:
+            logger.warning(f"[Fallback Resolver] Contract drift detected for {source_key} at {url}: {str(e)}")
+            last_exception = e
+            continue
         except Exception as e:
             logger.warning(f"[Fallback Resolver] Failed candidate {url} for {source_key}: {str(e)}")
             last_exception = e
@@ -318,73 +324,94 @@ async def heal_manga_details_background(
     """
     Asynchronously scrape sources, merge chapters non-destructively, and update MongoDB details.
     """
-    if not await check_db_online():
-        logger.warning("[Background Heal] MongoDB is offline. Skipping background healing.")
-        return
-        
-    logger.info(f"[Background Heal] Starting background healing for: {canonical_slug}")
-    
-    tasks = [fetch_source_details_with_fallback(key, canonical_slug, url, client=client) for key, url in sources.items()]
-    scraped_results = await asyncio.gather(*tasks)
-    successful_results = [r for r in scraped_results if r]
-    
-    if not successful_results:
-        logger.error(f"[Background Heal] All sources failed during background healing for {canonical_slug}")
-        return
-        
-    successful_results.sort(key=lambda x: x.get("latency", 999.0))
-    primary = successful_results[0]
-    secondary = successful_results[1] if len(successful_results) > 1 else None
-    
-    description = primary.get("description") or ""
-    genres = set(primary.get("genres") or [])
-    
-    if secondary:
-        if not description and secondary.get("description"):
-            description = secondary["description"]
-        if secondary.get("genres"):
-            genres.update(secondary["genres"])
+    try:
+        if not await check_db_online():
+            logger.warning("[Background Heal] MongoDB is offline. Skipping background healing.")
+            return
             
-    if existing_details:
-        if not description and existing_details.get("description"):
-            description = existing_details["description"]
-        if existing_details.get("genres"):
-            genres.update(existing_details["genres"])
+        logger.info(f"[Background Heal] Starting background healing for: {canonical_slug}")
+        
+        tasks = [fetch_source_details_with_fallback(key, canonical_slug, url, client=client) for key, url in sources.items()]
+        scraped_results = await asyncio.gather(*tasks)
+        successful_results = [r for r in scraped_results if r]
+        
+        if not successful_results:
+            logger.error(f"[Background Heal] All sources failed during background healing for {canonical_slug}")
+            return
             
-    merged_chapters = {}
-
-    # 1. Cache chapters (lowest priority)
-    if existing_details and "chapters" in existing_details:
-        for ch in existing_details["chapters"]:
-            try:
-                ch_title = str(ch.get("title") or "")
-                ch_url = str(ch.get("url") or "")
+        successful_results.sort(key=lambda x: x.get("latency", 999.0))
+        primary = successful_results[0]
+        secondary = successful_results[1] if len(successful_results) > 1 else None
+        
+        description = primary.get("description") or ""
+        genres = set(primary.get("genres") or [])
+        
+        if secondary:
+            if not description and secondary.get("description"):
+                description = secondary["description"]
+            if secondary.get("genres"):
+                genres.update(secondary["genres"])
                 
-                # Defensive lookup: prefer resolved chapter_number first, fallback to raw extracted_number
-                ch_num = ch.get("chapter_number")
-                if ch_num is None or ch_num == -1.0:
-                    ch_num = ch.get("extracted_number")
-                if ch_num is None or ch_num == -1.0:
-                    ch_num = extract_chapter_number(ch_title, ch_url)
-                    
-                try:
-                    ch_num = float(ch_num)
-                except (TypeError, ValueError):
-                    ch_num = -1.0
-                    
-                key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
-                merged_chapters[key] = {
-                    "title": ch_title,
-                    "url": ch_url,
-                    "chapter_number": ch_num,
-                    "extracted_number": ch_num
-                }
-            except Exception:
-                continue
+        if existing_details:
+            if not description and existing_details.get("description"):
+                description = existing_details["description"]
+            if existing_details.get("genres"):
+                genres.update(existing_details["genres"])
+                
+        merged_chapters = {}
 
-    # 2. Secondary source chapters (medium priority)
-    if secondary:
-        for ch in secondary.get("chapters", []):
+        # 1. Cache chapters (lowest priority)
+        if existing_details and "chapters" in existing_details:
+            for ch in existing_details["chapters"]:
+                try:
+                    ch_title = str(ch.get("title") or "")
+                    ch_url = str(ch.get("url") or "")
+                    
+                    # Defensive lookup: prefer resolved chapter_number first, fallback to raw extracted_number
+                    ch_num = ch.get("chapter_number")
+                    if ch_num is None or ch_num == -1.0:
+                        ch_num = ch.get("extracted_number")
+                    if ch_num is None or ch_num == -1.0:
+                        ch_num = extract_chapter_number(ch_title, ch_url)
+                        
+                    try:
+                        ch_num = float(ch_num)
+                    except (TypeError, ValueError):
+                        ch_num = -1.0
+                        
+                    key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                    merged_chapters[key] = {
+                        "title": ch_title,
+                        "url": ch_url,
+                        "chapter_number": ch_num,
+                        "extracted_number": ch_num
+                    }
+                except Exception:
+                    continue
+
+        # 2. Secondary source chapters (medium priority)
+        if secondary:
+            for ch in secondary.get("chapters", []):
+                try:
+                    ch_title = str(ch.get("title") or "")
+                    ch_url = str(ch.get("url") or "")
+                    ch_num = extract_chapter_number(ch_title, ch_url)
+                    try:
+                        ch_num = float(ch_num)
+                    except (TypeError, ValueError):
+                        ch_num = -1.0
+                    key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
+                    merged_chapters[key] = {
+                        "title": ch_title,
+                        "url": ch_url,
+                        "chapter_number": ch_num,
+                        "extracted_number": ch_num
+                    }
+                except Exception:
+                    continue
+
+        # 3. Primary source chapters (highest priority)
+        for ch in primary.get("chapters", []):
             try:
                 ch_title = str(ch.get("title") or "")
                 ch_url = str(ch.get("url") or "")
@@ -403,66 +430,65 @@ async def heal_manga_details_background(
             except Exception:
                 continue
 
-    # 3. Primary source chapters (highest priority)
-    for ch in primary.get("chapters", []):
-        try:
-            ch_title = str(ch.get("title") or "")
-            ch_url = str(ch.get("url") or "")
-            ch_num = extract_chapter_number(ch_title, ch_url)
-            try:
-                ch_num = float(ch_num)
-            except (TypeError, ValueError):
-                ch_num = -1.0
-            key = f"num_{ch_num}" if ch_num != -1.0 else f"text_{normalize_text(ch_title)}"
-            merged_chapters[key] = {
-                "title": ch_title,
-                "url": ch_url,
-                "chapter_number": ch_num,
-                "extracted_number": ch_num
-            }
-        except Exception:
-            continue
-
-    sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
-    final_chapters = infer_chapter_numbers(sorted_chapters)
-    
-    # Enforce strict schema uniformity after running the inference engine
-    for ch in final_chapters:
-        val = ch.get("chapter_number", -1.0)
-        ch["chapter_number"] = val
-        ch["extracted_number"] = val
-            
-    now_str = datetime.utcnow().isoformat()
-    cached_sources = [r["source_key"] for r in successful_results]
-    
-    details_payload = {
-        "description": description,
-        "genres": list(genres),
-        "total_chapters": len(final_chapters),
-        "chapters": final_chapters,
-        "last_cached_at": now_str,
-        "cached_sources": cached_sources
-    }
-    
-    update_payload = {
-        "details": details_payload,
-        "updated_at": now_str
-    }
-    
-    for r in successful_results:
-        src_key = r["source_key"]
-        resolved_url = r["resolved_url"]
-        update_payload[f"sources.{src_key}.url"] = resolved_url
-        update_payload[f"sources.{src_key}.updated_at"] = now_str
+        sorted_chapters = sorted(merged_chapters.values(), key=lambda x: x["extracted_number"], reverse=True)
+        final_chapters = infer_chapter_numbers(sorted_chapters)
         
-    try:
+        # Enforce strict schema uniformity after running the inference engine
+        for ch in final_chapters:
+            val = ch.get("chapter_number", -1.0)
+            ch["chapter_number"] = val
+            ch["extracted_number"] = val
+                
+        now_str = datetime.utcnow().isoformat()
+        cached_sources = [r["source_key"] for r in successful_results]
+        
+        details_payload = {
+            "description": description,
+            "genres": list(genres),
+            "total_chapters": len(final_chapters),
+            "chapters": final_chapters,
+            "last_cached_at": now_str,
+            "cached_sources": cached_sources
+        }
+        
+        update_payload = {
+            "details": details_payload,
+            "updated_at": now_str
+        }
+        
+        for r in successful_results:
+            src_key = r["source_key"]
+            resolved_url = r["resolved_url"]
+            update_payload[f"sources.{src_key}.url"] = resolved_url
+            update_payload[f"sources.{src_key}.updated_at"] = now_str
+            
         await manga_collection.update_one(
             {"slug": canonical_slug},
             {"$set": update_payload}
         )
         logger.info(f"[Background Heal] Cache updated for {canonical_slug} (Sources: {cached_sources})")
-    except Exception as exc:
-        logger.error(f"[Background Heal] Failed to save cache: {str(exc)}")
+        
+        # Clear the lock immediately on successful ingestion completion
+        await manga_collection.update_one(
+            {"slug": canonical_slug},
+            {"$unset": {"healing_lock": ""}}
+        )
+        logger.info(f"[D3 Lease] Healing successful. Lock explicitly cleared for slug: {canonical_slug}")
+        
+    except Exception as heal_exc:
+        logger.error(f"[SWR Background Error] Failed to heal manga {canonical_slug}: {str(heal_exc)}")
+        # Do not re-raise; exceptions are caught silently per existing design contract
+    finally:
+        # Defensive cleanup safeguard against state deadlocks
+        try:
+            await manga_collection.update_one(
+                {"slug": canonical_slug},
+                {"$unset": {"healing_lock": ""}}
+            )
+            logger.info(f"[D3 Lease] Finally cleanup block executed for slug: {canonical_slug}")
+        except Exception as final_db_exc:
+            # Silence internal DB errors in finally block to ensure seamless execution flow
+            pass
 
 
 @app.get(f"{API_PREFIX}/manga/details")
@@ -542,15 +568,50 @@ async def get_manga_details(
         if cached_details:
             logger.info(f"[API] Serving stale cached details for {canonical_slug}. Healing in background.")
             cleansed = cleanse_cached_chapters(cached_details.get("chapters") or [])
-            if background_tasks:
-                background_tasks.add_task(
-                    heal_manga_details_background,
-                    canonical_slug,
-                    manga_url,
-                    sources,
-                    cached_details,
-                    app.state.http_client
+            cached_details["chapters"] = cleansed
+
+            # D3 Implementation: Atomic Lease Acquisition Check
+            if background_tasks and await check_db_online():
+                now = datetime.utcnow()
+                lease_expiry = now + timedelta(seconds=HEALING_LEASE_TTL_SECONDS)
+                
+                lease_filter = {
+                    "slug": canonical_slug,
+                    "$or": [
+                        {"healing_lock": {"$exists": False}},
+                        {"healing_lock.expires_at": {"$lt": now.isoformat()}}
+                    ]
+                }
+                
+                lease_update = {
+                    "$set": {
+                        "healing_lock": {
+                            "expires_at": lease_expiry.isoformat(),
+                            "acquired_by": "render_api_worker"
+                        }
+                    }
+                }
+                
+                # Atomically query and acquire the lease in a single DB roundtrip
+                locked_doc = await manga_collection.find_one_and_update(
+                    lease_filter,
+                    lease_update,
+                    return_document=True
                 )
+                
+                if locked_doc:
+                    logger.info(f"[D3 Lease] Lock ACQUIRED for slug: {canonical_slug}. Enqueueing background healer.")
+                    background_tasks.add_task(
+                        heal_manga_details_background,
+                        canonical_slug,
+                        manga_url,
+                        sources,
+                        cached_details,
+                        app.state.http_client
+                    )
+                else:
+                    logger.info(f"[D3 Lease] Lock HELD by concurrent execution for slug: {canonical_slug}. Suppressing background task.")
+            
             return {
                 "status": "success",
                 "manga_url": manga_url,
@@ -695,7 +756,36 @@ async def get_manga_details(
             status_code=502,
             detail=f"HTTP connection error to target site: {str(exc)}"
         )
+    except MeshMangaContractDriftException as exc:
+        if manga_doc and manga_doc.get("details"):
+            logger.warning(f"[CONTRACT DRIFT FALLBACK] Serving stale cached details for {canonical_slug} due to contract drift: {str(exc)}")
+            cached_details = manga_doc["details"]
+            cleansed = cleanse_cached_chapters(cached_details.get("chapters") or [])
+            return {
+                "status": "success",
+                "manga_url": manga_url,
+                "description": cached_details.get("description") or "",
+                "genres": cached_details.get("genres") or [],
+                "total_chapters": len(cleansed),
+                "chapters": cleansed
+            }
+        raise HTTPException(
+            status_code=500,
+            detail=f"MeshManga API Contract Drift detected: {str(exc)}"
+        )
     except Exception as exc:
+        if manga_doc and manga_doc.get("details"):
+            logger.warning(f"[CRITICAL FAILURE FALLBACK] Serving stale cached details for {canonical_slug} due to critical error: {str(exc)}")
+            cached_details = manga_doc["details"]
+            cleansed = cleanse_cached_chapters(cached_details.get("chapters") or [])
+            return {
+                "status": "success",
+                "manga_url": manga_url,
+                "description": cached_details.get("description") or "",
+                "genres": cached_details.get("genres") or [],
+                "total_chapters": len(cleansed),
+                "chapters": cleansed
+            }
         raise HTTPException(
             status_code=500,
             detail=f"Failed to scrape manga details: {str(exc)}"

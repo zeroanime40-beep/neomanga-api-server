@@ -6,6 +6,74 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("uvicorn")
 
+class MeshMangaContractDriftException(Exception):
+    """Exception raised when MeshManga API contract drifts."""
+    pass
+
+def validate_meshmanga_payload(data: dict, schema_type: str) -> None:
+    try:
+        if not isinstance(data, dict):
+            raise MeshMangaContractDriftException("Response is not a JSON object")
+            
+        if schema_type == "series_list":
+            if "results" not in data:
+                raise MeshMangaContractDriftException("Missing 'results' key in response")
+            if not isinstance(data["results"], list):
+                raise MeshMangaContractDriftException("'results' key is not a list")
+            for idx, item in enumerate(data["results"]):
+                if not isinstance(item, dict):
+                    raise MeshMangaContractDriftException(f"Item at index {idx} in results is not a dict")
+                if "slug" not in item:
+                    raise MeshMangaContractDriftException(f"Missing 'slug' key in results item index {idx}")
+                    
+        elif schema_type == "search":
+            if "results" not in data:
+                raise MeshMangaContractDriftException("Missing 'results' key in response")
+            if not isinstance(data["results"], list):
+                raise MeshMangaContractDriftException("'results' key is not a list")
+            for idx, item in enumerate(data["results"]):
+                if not isinstance(item, dict):
+                    raise MeshMangaContractDriftException(f"Item at index {idx} in results is not a dict")
+                if "id" not in item:
+                    raise MeshMangaContractDriftException(f"Missing 'id' key in results item index {idx}")
+                    
+        elif schema_type == "details":
+            if "story" not in data:
+                raise MeshMangaContractDriftException("Missing 'story' key in details response")
+            if "genres" not in data:
+                raise MeshMangaContractDriftException("Missing 'genres' key in details response")
+            if not isinstance(data["genres"], list):
+                raise MeshMangaContractDriftException("'genres' key is not a list")
+            for idx, g in enumerate(data["genres"]):
+                if not isinstance(g, dict):
+                    raise MeshMangaContractDriftException(f"Genre item at index {idx} is not a dict")
+                    
+        elif schema_type == "chapters":
+            if "results" not in data:
+                raise MeshMangaContractDriftException("Missing 'results' key in chapters response")
+            if not isinstance(data["results"], list):
+                raise MeshMangaContractDriftException("'results' key is not a list")
+            for idx, ch in enumerate(data["results"]):
+                if not isinstance(ch, dict):
+                    raise MeshMangaContractDriftException(f"Chapter item at index {idx} is not a dict")
+                if "id" not in ch:
+                    raise MeshMangaContractDriftException(f"Missing 'id' key in chapter index {idx}")
+                    
+        elif schema_type == "pages":
+            if "images" not in data:
+                raise MeshMangaContractDriftException("Missing 'images' key in pages response")
+            if not isinstance(data["images"], list):
+                raise MeshMangaContractDriftException("'images' key is not a list")
+            for idx, img in enumerate(data["images"]):
+                if not isinstance(img, dict):
+                    raise MeshMangaContractDriftException(f"Image item at index {idx} is not a dict")
+                if "image" not in img:
+                    raise MeshMangaContractDriftException(f"Missing 'image' key in image item index {idx}")
+    except MeshMangaContractDriftException as exc:
+        details = str(exc)
+        logger.error(f"[CONTRACT DRIFT] Domain: meshmanga.com | REST API structural change detected. Missing/malformed: {details}")
+        raise
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -27,6 +95,7 @@ async def scrape_meshmanga_latest(site_url: str, client: Optional[httpx.AsyncCli
             response.raise_for_status()
             data = response.json()
         
+    validate_meshmanga_payload(data, "series_list")
     results = data.get("results", [])
     updates = []
     for item in results:
@@ -60,6 +129,7 @@ async def scrape_meshmanga_catalog(site_url: str, page: int, client: Optional[ht
             response.raise_for_status()
             data = response.json()
         
+    validate_meshmanga_payload(data, "series_list")
     results = data.get("results", [])
     items = []
     for item in results:
@@ -87,6 +157,7 @@ async def get_series_id_by_slug(client: httpx.AsyncClient, slug: str) -> int:
     res.raise_for_status()
     data = res.json()
     
+    validate_meshmanga_payload(data, "search")
     results = data.get("results", [])
     
     # 1. Exact match on slug
@@ -136,6 +207,7 @@ async def scrape_meshmanga_details(manga_url: str, client: Optional[httpx.AsyncC
         detail_res.raise_for_status()
         detail_data = detail_res.json()
         
+        validate_meshmanga_payload(detail_data, "details")
         story = detail_data.get("story", "")
         genres = [g.get("name") for g in detail_data.get("genres", []) if g.get("name")]
         
@@ -151,6 +223,7 @@ async def scrape_meshmanga_details(manga_url: str, client: Optional[httpx.AsyncC
             ch_res.raise_for_status()
             ch_data = ch_res.json()
             
+            validate_meshmanga_payload(ch_data, "chapters")
             for ch in ch_data.get("results", []):
                 ch_id = ch.get("id")
                 ch_num = ch.get("chapter", "")
@@ -192,6 +265,7 @@ async def scrape_meshmanga_pages(chapter_url: str, client: Optional[httpx.AsyncC
             response.raise_for_status()
             data = response.json()
         
+    validate_meshmanga_payload(data, "pages")
     images = data.get("images", [])
     # Extract images sorted by their 'order' value
     sorted_images = sorted(images, key=lambda x: x.get("order", 0))
